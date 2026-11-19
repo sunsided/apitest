@@ -70,12 +70,34 @@ tasks:
 
   npm:check:
     desc: Type-check the JS demo suites against the published TypeScript declarations
+    vars:
+      TSC: npx --yes -p typescript@7.0.2 tsc
     preconditions:
       - &node
         sh: command -v npx
         msg: "Node.js not found - https://nodejs.org/"
     cmds:
-      - npx --yes -p typescript@5.8.3 tsc -p demo/suites/jsconfig.json
+      - '{{.TSC}} -p demo/suites/jsconfig.json'
+      # The check above passes vacuously if `include` stops matching: every suite must be in it.
+      - |
+        files=$({{.TSC}} -p demo/suites/jsconfig.json --listFilesOnly)
+        for suite in demo/suites/*.js; do
+          if ! echo "$files" | grep -q "/$suite\$"; then
+            echo "$suite is not part of the type-checked program (demo/suites/jsconfig.json)"
+            exit 1
+          fi
+        done
+      # Positive control: a known type error must be reported, or the check above proves nothing.
+      - |
+        if out=$({{.TSC}} -p npm/typecheck/jsconfig.json --pretty false 2>&1); then
+          echo "npm/typecheck/must-fail.js type-checked cleanly; JS suites are no longer checked"
+          exit 1
+        fi
+        if ! echo "$out" | grep 'must-fail.js' | grep -q 'error TS2345'; then
+          echo "unexpected tsc output for npm/typecheck/must-fail.js:"
+          echo "$out"
+          exit 1
+        fi
 
   npm:smoke:
     desc: Pack the npm launcher and the host platform package, install them and run the CLI
