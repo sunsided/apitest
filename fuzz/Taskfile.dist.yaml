@@ -4,6 +4,10 @@ version: '3'
 
 vars:
   MAX_TIME: '{{.MAX_TIME | default "10"}}'
+  # cargo-fuzz defaults to the target it was built for, which breaks ASan when that is a musl
+  # build; pin the host triple instead (override with FUZZ_TRIPLE=...). CI passes the same.
+  FUZZ_TRIPLE:
+    sh: "rustc +nightly -vV | sed -n 's/^host: //p'"
 
 tasks:
   list:
@@ -20,7 +24,7 @@ tasks:
     desc: Build all fuzz targets
     preconditions: *nightly
     cmds:
-      - cargo +nightly fuzz build
+      - cargo +nightly fuzz build --target {{.FUZZ_TRIPLE}}
 
   run:
     desc: "Fuzz one target: task fuzz:run TARGET=name -- <libFuzzer flags>"
@@ -28,7 +32,7 @@ tasks:
     requires:
       vars: [TARGET]
     cmds:
-      - cargo +nightly fuzz run {{.TARGET}} -- {{.CLI_ARGS}}
+      - cargo +nightly fuzz run --target {{.FUZZ_TRIPLE}} {{.TARGET}} -- {{.CLI_ARGS}}
 
   smoke:
     desc: Run every fuzz target for MAX_TIME seconds (default 10)
@@ -37,7 +41,7 @@ tasks:
       - |
         set -e
         for target in $(cargo +nightly fuzz list); do
-          cargo +nightly fuzz run "$target" -- -max_total_time={{.MAX_TIME}}
+          cargo +nightly fuzz run --target {{.FUZZ_TRIPLE}} "$target" -- -max_total_time={{.MAX_TIME}}
         done
 
   fmt:
