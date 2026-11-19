@@ -18,7 +18,7 @@ all-features = true
 # libtest harness (pulls clap via libtest-mimic) are opt-in.
 default = ["load", "axum"]
 ## Everything, as used by the CLI and the tests in this repo
-full = ["rhai", "js", "load", "harness", "axum", "macros"]
+full = ["rhai", "js", "load", "harness", "axum", "macros", "diagnostics"]
 ## Rhai scripting frontend
 rhai = ["dep:rhai"]
 ## JavaScript (QuickJS) scripting frontend
@@ -29,6 +29,9 @@ load = ["dep:hdrhistogram"]
 harness = ["dep:libtest-mimic"]
 ## Serve axum routers in-process for tests
 axum = ["dep:axum"]
+## Terminal rendering of failures with miette (`SuiteReport::render_terminal`).
+## JUnit, JSON and harness messages stay plain text either way.
+diagnostics = ["dep:miette"]
 ## #[apitest::test] / #[apitest::fixture] / #[apitest::suite] registration
 macros = ["dep:apitest-macros", "dep:linkme"]
 
@@ -50,6 +53,7 @@ libtest-mimic = { version = "0.8", optional = true }
 apitest-macros = { workspace = true, optional = true }
 linkme = { version = "0.3", optional = true }
 axum = { version = "0.8", optional = true, default-features = false, features = ["tokio", "http1"] }
+miette = { version = "7.6", default-features = false, features = ["fancy-no-backtrace"], optional = true }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["json", "form", "query"] }

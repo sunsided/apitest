@@ -570,9 +570,7 @@ async fn run_one(suite: Arc<Suite>, vu: Ctx, index: usize) -> TestReport {
         steps,
         outcome: match result {
             Ok(()) => Outcome::Passed,
-            Err(e) => Outcome::Failed {
-                message: format!("{e:#}"),
-            },
+            Err(e) => Outcome::failed(&e),
         },
         duration_ms: elapsed_ms(started),
         teardown_errors,
@@ -597,6 +595,7 @@ pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
         suite: suite.name.clone(),
         tests: vec![],
         setup_error: None,
+        setup_chain: vec![],
         teardown_errors: vec![],
         drift: vec![],
         duration_ms: 0.0,
@@ -605,14 +604,14 @@ pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
     let shared = match make_shared(&suite, cfg) {
         Ok(s) => s,
         Err(e) => {
-            report.setup_error = Some(format!("{e:#}"));
+            report.set_setup_error(&e);
             report.tests = skipped_reports(&suite, &selected, "runner setup failed");
             return report;
         }
     };
 
     if let Err((error, reason)) = drift_gate(&suite, cfg, &mut report.drift).await {
-        report.setup_error = Some(error);
+        report.set_setup_error(&error);
         report.tests = skipped_reports(&suite, &selected, reason);
         report.duration_ms = elapsed_ms(started);
         return report;
@@ -626,7 +625,7 @@ pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
 
     match suite_setup(&suite, &scx).await {
         Err(e) => {
-            report.setup_error = Some(e);
+            report.set_setup_error(&e);
             report.tests = skipped_reports(&suite, &selected, "suite setup failed");
         }
         Ok(()) => run_tests_in_vu(&suite, &scx, &selected, cfg, &mut report).await,
@@ -689,17 +688,17 @@ async fn drift_gate(
     suite: &Suite,
     cfg: &RunConfig,
     drift: &mut Vec<DriftReport>,
-) -> Result<(), (String, &'static str)> {
+) -> Result<(), (anyhow::Error, &'static str)> {
     *drift = check_drift(&suite.contracts, cfg)
         .await
-        .map_err(|e| (format!("contract check: {e:#}"), "contract check failed"))?;
+        .map_err(|e| (e.context("contract check"), "contract check failed"))?;
     if cfg.check_drift && drift.iter().any(DriftReport::is_breaking) {
         let names: Vec<_> = drift
             .iter()
             .filter(|d| d.is_breaking())
             .map(|d| d.contract.clone())
             .collect();
-        let error = format!(
+        let error = anyhow!(
             "live API is incompatible with pinned contract(s): {}",
             names.join(", ")
         );
@@ -710,13 +709,11 @@ async fn drift_gate(
 }
 
 /// Runs suite fixtures, then the `before_all` hooks; returns the joined errors on failure.
-async fn suite_setup(suite: &Suite, scx: &Ctx) -> Result<(), String> {
-    setup_fixtures(suite, scx, Scope::Suite)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+async fn suite_setup(suite: &Suite, scx: &Ctx) -> Result<()> {
+    setup_fixtures(suite, scx, Scope::Suite).await?;
     let errs = run_hooks(suite, scx, HookKind::BeforeAll).await;
     if !errs.is_empty() {
-        return Err(errs.join("; "));
+        return Err(anyhow!(errs.join("; ")));
     }
 
     Ok(())
@@ -734,7 +731,7 @@ async fn run_tests_in_vu(
     let vu = scx.child_vu(0);
     match setup_fixtures(suite, &vu, Scope::Vu).await {
         Err(e) => {
-            report.setup_error = Some(format!("{e:#}"));
+            report.set_setup_error(&e);
             report.tests = skipped_reports(suite, selected, "vu setup failed");
         }
         Ok(()) => report.tests = schedule(suite, &vu, selected, cfg.max_parallel).await,

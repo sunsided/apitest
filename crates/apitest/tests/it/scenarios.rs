@@ -160,7 +160,7 @@ async fn runtime_validation_catches_drift_when_drift_check_is_off() {
         .iter()
         .find(|t| t.name == "v2 payload against v1 contract")
         .unwrap();
-    let Outcome::Failed { message } = &t.outcome else {
+    let Outcome::Failed { message, .. } = &t.outcome else {
         panic!("expected failure, got {:?}", t.outcome)
     };
     println!("{message}");
@@ -255,7 +255,7 @@ async fn cleanups_run_after_failures_panics_and_timeouts() {
         .tests
         .iter()
         .map(|t| match &t.outcome {
-            Outcome::Failed { message } => message.clone(),
+            Outcome::Failed { message, .. } => message.clone(),
             o => format!("{o:?}"),
         })
         .collect();

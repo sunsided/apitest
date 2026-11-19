@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 
 use apitest::config::ProjectConfig;
 use apitest::contract::{Contract, DriftReport, Spec};
+use apitest::diagnostic;
 use apitest::load::{Executor, LoadPlan, Scenario, Stage, Threshold, parse_duration, run_load};
 use apitest::report::junit_xml;
 use apitest::runner::{RunConfig, check_drift, run_suite};
@@ -188,7 +189,8 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
-            eprintln!("error: {e:#}");
+            let color = diagnostic::use_color(&std::io::stderr());
+            eprint!("{}", diagnostic::render_error(&e, color));
             ExitCode::from(2)
         }
     }
@@ -299,11 +301,13 @@ async fn run_tests(args: RunArgs) -> Result<bool> {
     let opts = LoadOptions {
         js_workers: project.as_ref().and_then(|p| p.js_workers).unwrap_or(2),
     };
+    let color = diagnostic::use_color(&std::io::stdout());
     let mut reports = vec![];
     for f in suite_files(&args.files, project.as_ref())? {
         for s in load_suites(&f, &opts)? {
             let r = run_suite(&s, &cfg).await;
-            print!("{}", r.render());
+            // miette on the terminal; the JUnit and JSON reports stay plain.
+            print!("{}", r.render_terminal(color));
             reports.push(r);
         }
     }

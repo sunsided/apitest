@@ -374,7 +374,7 @@ async fn login_failures_say_who_and_where() {
         &cfg(&srv).login_flow("svc", LoginFlow::path("/login")),
     )
     .await;
-    let Outcome::Failed { message } = &report.tests[0].outcome else {
+    let Outcome::Failed { message, .. } = &report.tests[0].outcome else {
         panic!("expected failure")
     };
     assert!(

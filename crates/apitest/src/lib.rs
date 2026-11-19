@@ -39,6 +39,8 @@ pub mod serve;
 pub mod suite;
 pub mod trace;
 
+#[cfg(feature = "diagnostics")]
+pub mod diagnostic;
 #[cfg(feature = "harness")]
 pub mod harness;
 #[cfg(feature = "macros")]

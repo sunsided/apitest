@@ -377,20 +377,28 @@ fn contract_trial(suite: &str, d: &DriftReport) -> Trial {
 /// The trial of one test: ignored if skipped, failed with steps, error and cleanup
 /// errors otherwise.
 fn test_trial(t: TestReport) -> Trial {
-    let name = t.id.clone();
-    let trail = t.step_trail();
-    match t.outcome {
-        Outcome::Skipped { .. } => Trial::test(name, || Ok(())).with_ignored_flag(true),
-        Outcome::Passed if t.teardown_errors.is_empty() => Trial::test(name, || Ok(())),
-        Outcome::Passed => {
-            let e = format!("cleanup failed:\n{}", t.teardown_errors.join("\n"));
-            Trial::test(name, move || Err(Failed::from(e)))
-        }
-        Outcome::Failed { message } => {
+    if let Some(e) = test_failure(&t) {
+        return Trial::test(t.id, move || Err(Failed::from(e)));
+    }
+
+    let skipped = matches!(t.outcome, Outcome::Skipped { .. });
+    Trial::test(t.id, || Ok(())).with_ignored_flag(skipped)
+}
+
+/// The libtest failure message of one test, `None` if it passed or was skipped.
+///
+/// Plain text on purpose: libtest, nextest and IDEs show and parse it. Terminal
+/// rendering with miette is only for the CLI (`SuiteReport::render_terminal`).
+fn test_failure(t: &TestReport) -> Option<String> {
+    match &t.outcome {
+        Outcome::Skipped { .. } => None,
+        Outcome::Passed if t.teardown_errors.is_empty() => None,
+        Outcome::Passed => Some(format!("cleanup failed:\n{}", t.teardown_errors.join("\n"))),
+        Outcome::Failed { message, .. } => {
             let mut e = if t.steps.is_empty() {
-                message
+                message.clone()
             } else {
-                format!("steps:\n{trail}\n\n{message}")
+                format!("steps:\n{}\n\n{message}", t.step_trail())
             };
             if !t.teardown_errors.is_empty() {
                 let _ = write!(
@@ -400,7 +408,7 @@ fn test_trial(t: TestReport) -> Trial {
                 );
             }
 
-            Trial::test(name, move || Err(Failed::from(e)))
+            Some(e)
         }
     }
 }
@@ -455,10 +463,10 @@ fn folded_test_trial(t: TestReport, suite_problems: &[String]) -> Trial {
     let mut problems = suite_problems.to_vec();
     let trail = t.step_trail();
     match t.outcome {
-        Outcome::Failed { message } if !t.steps.is_empty() => {
+        Outcome::Failed { message, .. } if !t.steps.is_empty() => {
             problems.insert(0, format!("steps:\n{trail}\n\n{message}"));
         }
-        Outcome::Failed { message } => problems.insert(0, message),
+        Outcome::Failed { message, .. } => problems.insert(0, message),
         Outcome::Skipped { reason } if suite_problems.is_empty() => {
             problems.push(format!("skipped: {reason}"));
         }
@@ -536,5 +544,45 @@ mod xlock {
         }
 
         Ok(Held { _files: held })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::{Context as _, anyhow};
+
+    use super::test_failure;
+    use crate::report::{Outcome, StepReport, TestReport};
+
+    /// libtest messages keep the joined chain and carry no miette glyphs or colours.
+    #[test]
+    fn failure_messages_are_plain_text() {
+        let e = Err::<(), _>(anyhow!("status 401"))
+            .context("login as 'mallory' failed")
+            .context("step 'sign in' failed")
+            .unwrap_err();
+        let t = TestReport {
+            name: "t".into(),
+            id: "s::t".into(),
+            outcome: Outcome::failed(&e),
+            duration_ms: 1.0,
+            teardown_errors: vec!["defer 'x': gone".into()],
+            steps: vec![StepReport {
+                name: "sign in".into(),
+                duration_ms: 1.0,
+                error: Some("login as 'mallory' failed: status 401".into()),
+            }],
+        };
+
+        let msg = test_failure(&t).unwrap();
+        assert_eq!(
+            msg,
+            "steps:\n  ✗ sign in [1 ms]\n\n\
+             step 'sign in' failed: login as 'mallory' failed: status 401\n\
+             cleanup also failed:\ndefer 'x': gone"
+        );
+        for glyph in ["×", "─▶", "\x1b["] {
+            assert!(!msg.contains(glyph), "{msg}");
+        }
     }
 }

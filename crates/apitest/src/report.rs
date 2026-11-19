@@ -1,4 +1,9 @@
 //! Run results, console output and standard report formats (`JUnit` XML, JSON).
+//!
+//! Everything here is plain text: [`SuiteReport::render`], [`junit_xml`] and the
+//! JSON form (via `serde`) are read by CI systems, IDEs and `cargo test`, so they
+//! carry no colours, box drawing or miette glyphs. Terminal output with miette
+//! diagnostics is `SuiteReport::render_terminal` (feature `diagnostics`).
 
 use std::fmt::Write as _;
 
@@ -14,14 +19,38 @@ pub enum Outcome {
     Passed,
     /// Setup, the body or a `before_each` hook failed.
     Failed {
-        /// The error chain, possibly spanning several lines.
+        /// The error with its causes, joined by `": "` (anyhow's `{:#}`), possibly
+        /// spanning several lines.
         message: String,
+        /// The error and its causes, outermost first, for terminal rendering.
+        ///
+        /// Not serialized. Empty when the failure didn't come from an error value,
+        /// and ignored unless it joins (with `": "`) to `message`; build both with
+        /// [`Outcome::failed`].
+        #[serde(skip)]
+        chain: Vec<String>,
     },
     /// The test never ran, e.g. because suite setup or the drift check failed.
     Skipped {
         /// Why the test was skipped.
         reason: String,
     },
+}
+
+impl Outcome {
+    /// A failure from an error, keeping its cause chain for terminal rendering.
+    #[must_use]
+    pub fn failed(e: &anyhow::Error) -> Self {
+        Outcome::Failed {
+            message: format!("{e:#}"),
+            chain: error_chain(e),
+        }
+    }
+}
+
+/// The messages of `e` and its causes, outermost first.
+fn error_chain(e: &anyhow::Error) -> Vec<String> {
+    e.chain().map(ToString::to_string).collect()
 }
 
 /// A named step inside a test (see [`crate::dsl::step`]).
@@ -86,6 +115,12 @@ pub struct SuiteReport {
     pub tests: Vec<TestReport>,
     /// Suite-level setup failure (drift, suite fixture, `before_all`).
     pub setup_error: Option<String>,
+    /// Cause chain of `setup_error`, outermost first, for terminal rendering.
+    ///
+    /// Not serialized; empty when the failure didn't come from an error value.
+    /// Set both with [`SuiteReport::set_setup_error`].
+    #[serde(skip)]
+    pub setup_chain: Vec<String>,
     /// Suite-level teardown failures (`after_all`, suite/vu cleanups).
     pub teardown_errors: Vec<String>,
     /// Drift-check results, one per contract with a live spec.
@@ -95,6 +130,12 @@ pub struct SuiteReport {
 }
 
 impl SuiteReport {
+    /// Records a suite-level setup failure together with its cause chain.
+    pub fn set_setup_error(&mut self, e: &anyhow::Error) {
+        self.setup_error = Some(format!("{e:#}"));
+        self.setup_chain = error_chain(e);
+    }
+
     /// `true` if suite setup and teardown succeeded and every test passed.
     #[must_use]
     pub fn passed(&self) -> bool {
@@ -135,9 +176,37 @@ impl SuiteReport {
         c
     }
 
-    /// Human-readable summary.
+    /// Plain-text summary, for logs, panics and anything that isn't a terminal.
     #[must_use]
     pub fn render(&self) -> String {
+        self.render_with(&|message, _chain| message.to_string())
+    }
+
+    /// Summary for a terminal: like [`render`](Self::render), but failures are
+    /// miette diagnostics with their cause chains.
+    ///
+    /// `color` adds ANSI colours; see [`crate::diagnostic::use_color`].
+    #[cfg(feature = "diagnostics")]
+    #[must_use]
+    pub fn render_terminal(&self, color: bool) -> String {
+        self.render_with(&|message, chain| {
+            // A chain that disagrees with the message would show different text
+            // than render() and JUnit, so fall back to the message alone.
+            let chain = if chain.join(": ") == message {
+                chain
+            } else {
+                &[]
+            };
+            crate::diagnostic::render_chain(message, chain, color)
+                .trim_end()
+                .to_string()
+        })
+    }
+
+    /// The summary behind [`render`](Self::render) and `render_terminal`.
+    ///
+    /// `error(message, chain)` formats one failure; its lines get indented here.
+    fn render_with(&self, error: &dyn Fn(&str, &[String]) -> String) -> String {
         let mut s = String::new();
         let _ = writeln!(s, "suite {}", self.suite);
         for d in &self.drift {
@@ -145,11 +214,11 @@ impl SuiteReport {
         }
 
         if let Some(e) = &self.setup_error {
-            let _ = writeln!(s, "  ✗ setup failed: {e}");
+            render_setup_error(&mut s, e, &error(e, &self.setup_chain));
         }
 
         for t in &self.tests {
-            render_test(&mut s, t);
+            render_test(&mut s, t, error);
         }
 
         for e in &self.teardown_errors {
@@ -193,12 +262,25 @@ fn render_drift(s: &mut String, d: &DriftReport) {
     }
 }
 
+/// Appends the suite setup failure `e`, shown as `rendered`.
+///
+/// Plain text stays on the status line; a diagnostic goes indented below it.
+fn render_setup_error(s: &mut String, e: &str, rendered: &str) {
+    if rendered == e {
+        let _ = writeln!(s, "  ✗ setup failed: {e}");
+    } else {
+        let _ = writeln!(s, "  ✗ setup failed\n{}", indent(rendered, "      "));
+    }
+}
+
 /// Appends a test's status line, and for failures its steps, error and cleanup errors.
-fn render_test(s: &mut String, t: &TestReport) {
+///
+/// `error(message, chain)` formats the failure, as in [`SuiteReport::render_with`].
+fn render_test(s: &mut String, t: &TestReport, error: &dyn Fn(&str, &[String]) -> String) {
     let (mark, inline, failure) = match &t.outcome {
         Outcome::Passed if t.teardown_errors.is_empty() => ("✓", String::new(), None),
         Outcome::Passed => ("✗", " (cleanup failed)".into(), None),
-        Outcome::Failed { message } => ("✗", String::new(), Some(message)),
+        Outcome::Failed { message, chain } => ("✗", String::new(), Some((message, chain))),
         Outcome::Skipped { reason } => ("-", format!(" (skipped: {reason})"), None),
     };
     let _ = writeln!(s, "  {mark} {} [{:.0} ms]{inline}", t.name, t.duration_ms);
@@ -210,8 +292,8 @@ fn render_test(s: &mut String, t: &TestReport) {
         }
     }
 
-    if let Some(msg) = failure {
-        let _ = writeln!(s, "      {}", msg.replace('\n', "\n      "));
+    if let Some((message, chain)) = failure {
+        let _ = writeln!(s, "{}", indent(&error(message, chain), "      "));
     }
 
     for e in &t.teardown_errors {
@@ -388,7 +470,7 @@ fn test_case(suite: &str, t: &TestReport) -> String {
 
     match &t.outcome {
         Outcome::Passed => {}
-        Outcome::Failed { message } => {
+        Outcome::Failed { message, .. } => {
             let first = message.lines().next().unwrap_or_default();
             let _ = writeln!(
                 c,
@@ -416,6 +498,20 @@ fn test_case(suite: &str, t: &TestReport) -> String {
 
     c.push_str("    </testcase>\n");
     c
+}
+
+/// Prefixes every non-empty line of `text` with `by`.
+fn indent(text: &str, by: &str) -> String {
+    text.lines()
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("{by}{l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Escapes `s` for XML text and attribute values, dropping control characters
