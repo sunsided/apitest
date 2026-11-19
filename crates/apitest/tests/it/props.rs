@@ -157,7 +157,9 @@ proptest! {
             }
             SpecSource::File(p) => {
                 prop_assert!(!is_url, "{raw:?} became file {p:?}");
-                prop_assert!(p.starts_with(&base), "{p:?} is not under {base:?}");
+                let typed = std::path::Path::new(raw.trim());
+                let expected = if typed.is_absolute() { typed.to_path_buf() } else { base.join(typed) };
+                prop_assert_eq!(p, expected);
             }
             SpecSource::Document(_) => prop_assert!(false, "parsed into a document"),
         }
