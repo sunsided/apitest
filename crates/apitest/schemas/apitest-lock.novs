@@ -1,0 +1,26 @@
+# Schema of `apitest.lock.nova`: what each contract is pinned to and which part
+# of it the suites actually use. Written by `apitest run --update-lock`.
+@schema apitest-lock@0.1.0
+@root Lockfile
+
+record Lockfile:
+  contract: map<string, LockedContract>
+
+record LockedContract:
+  # Pinned spec, relative to the lockfile.
+  spec: string @len(1..)
+  # `info.version` of the pinned spec.
+  version: string
+  # SHA-256 of the pinned spec file; recorded usage is discarded when it changes.
+  sha256: string @len(64..64)
+  used: list<OpUsage>
+
+record OpUsage:
+  # operationId
+  op: string @key
+  # Path and query parameters the suites set.
+  params?: list<string>
+  # Top-level JSON request fields the suites send.
+  request_fields?: list<string>
+  # Response statuses the suites observed.
+  statuses: list<u16 @range(100..599)>

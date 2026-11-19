@@ -1,0 +1,101 @@
+openapi: 3.0.3
+info:
+  title: Demo Patient App API
+  version: 1.0.0
+paths:
+  /patients:
+    post:
+      operationId: registerPatient
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string, minLength: 8 }
+                demo: { type: boolean }
+      responses:
+        "201":
+          description: Registered; a confirmation e-mail is on its way
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Patient" }
+        "409": { $ref: "#/components/responses/Error" }
+  /patients/me:
+    delete:
+      operationId: deletePatient
+      responses:
+        "204": { description: Account deleted }
+        "401": { $ref: "#/components/responses/Error" }
+  /confirm:
+    get:
+      operationId: confirmEmail
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Confirmation page (HTML) }
+        "404": { description: Unknown token }
+  /auth/login:
+    post:
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /activation-codes:
+    post:
+      operationId: createActivationCode
+      responses:
+        "201":
+          description: A code the patient hands to their social worker
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, expires_in]
+                properties:
+                  code: { type: string, pattern: "^[A-Z0-9]{4}-[A-Z0-9]{4}$" }
+                  expires_in: { type: integer }
+        "401": { $ref: "#/components/responses/Error" }
+components:
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Patient:
+      type: object
+      required: [id, email, status]
+      properties:
+        id: { type: string }
+        email: { type: string }
+        demo: { type: boolean }
+        status: { type: string, enum: [pending_confirmation, active] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: Demo Hub API
+  version: 1.0.0
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+        "401": { $ref: "#/components/responses/Error" }
+  /users:
+    post:
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, role]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                role: { type: string, enum: [social_service, admin] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /users/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteUser
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /identifications:
+    post:
+      operationId: identifyPatient
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activation_code]
+              properties:
+                activation_code: { type: string }
+      responses:
+        "201":
+          description: Patient identified, case opened
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Case" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /cases/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getCase
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Case" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      operationId: updateCase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { $ref: "#/components/schemas/CaseStatus" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Case" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteCase
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+  /cases/{id}/therapy:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: putTherapy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Therapy" }
+      responses:
+        "200":
+          description: Therapy data stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Case" }
+        "404": { $ref: "#/components/responses/Error" }
+components:
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string }
+        password: { type: string }
+    Token:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+    User:
+      type: object
+      required: [id, email, role]
+      properties:
+        id: { type: string }
+        email: { type: string }
+        role: { type: string, enum: [social_service, admin] }
+    CaseStatus:
+      type: string
+      enum: [new, in_progress, closed]
+    Therapy:
+      type: object
+      required: [plan, sessions_per_week]
+      properties:
+        plan: { type: string }
+        sessions_per_week: { type: integer, minimum: 1 }
+        notes: { type: string, nullable: true }
+    Case:
+      type: object
+      required: [id, patient_id, social_worker_id, status]
+      properties:
+        id: { type: string }
+        patient_id: { type: string }
+        social_worker_id: { type: string }
+        status: { $ref: "#/components/schemas/CaseStatus" }
+        therapy: { $ref: "#/components/schemas/Therapy" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

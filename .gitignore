@@ -1,0 +1,9 @@
+/target
+**/__pycache__/
+*.so
+*.pyd
+.venv/
+crates/apitest-py/python/apitest/*.so
+node_modules/
+npm/dist/
+*.tgz

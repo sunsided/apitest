@@ -1,0 +1,21 @@
+# apitest project config (NOVA). Run from this directory: apitest run
+# Schema: crates/apitest/schemas/apitest-config.novs
+@schema apitest-config@0.1.0
+
+base_url: http://127.0.0.1:8080
+lockfile: apitest.lock.nova
+max_parallel: 8
+test_timeout: @duration("30s")
+js_workers: 2
+
+vars:
+  API_USER: demo
+  API_PASS: secret
+
+suites:
+  - suites/billing.rhai
+  - suites/billing.js
+
+reports:
+  junit: ../target/apitest/junit.xml
+  json: ../target/apitest/report.json

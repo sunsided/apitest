@@ -1,0 +1,110 @@
+# Schema of the apitest project configuration (`apitest.nova`).
+# Every field is optional; command-line flags override the file.
+@schema apitest-config@0.1.0
+@root Config
+
+record Config:
+  # Prefix for relative request paths of actors/contracts without a service.
+  base_url?: string @len(1..)
+  # Named services (hub, app, mail, ...) → base URL.
+  services?: map<string, string>
+  # Path of the lockfile, relative to this file. Default: apitest.lock.nova
+  lockfile?: string @len(1..)
+  # Upper bound for concurrently running `parallel` tests.
+  max_parallel?: u32 @range(1..)
+  test_timeout?: duration
+  # Timeout of each fixture setup, hook and cleanup.
+  hook_timeout?: duration
+  # Variables for env("…") / cx.env("…"); take precedence over the process environment.
+  vars?: map<string, string>
+  # Suite files (.rhai, .js) run by `apitest run` without arguments.
+  suites?: list<string>
+  reports?: Reports
+  # JS runtimes per suite in functional runs (load runs use one per VU).
+  js_workers?: u32 @range(1..)
+  # Default User-Agent of every request (default: apitest/<version>).
+  user_agent?: string @len(1..)
+  tracing?: Tracing
+  # How each service turns username + password into a token.
+  auth?: map<string, LoginFlow>
+  # Named actors: actor("hub_admin") in Rust, { as: "hub_admin" } in scripts.
+  actors?: map<string, Actor>
+
+record Reports:
+  # JUnit XML report path.
+  junit?: string @len(1..)
+  # JSON report path.
+  json?: string @len(1..)
+
+# Trace-context propagation. On by default with W3C `traceparent`.
+record Tracing:
+  enabled?: bool
+  # Header formats; combine freely. Azure uses w3c.
+  formats?: list<TraceFormat>
+  # Sampled flag sent with every format.
+  sampled?: bool
+  # How long one trace id lives.
+  scope?: TraceScope
+  # W3C tracestate to send, e.g. "vendor=value".
+  tracestate?: string
+  # Static W3C baggage entries.
+  baggage?: map<string, string>
+  # Add apitest.suite / apitest.test to the baggage.
+  test_baggage?: bool
+  # Parent traceparent for the whole run; all requests join that trace.
+  parent?: string
+  # Use the TRACEPARENT / TRACESTATE environment variables as the parent (default: false).
+  inherit_env?: bool
+
+enum TraceFormat = w3c | b3 | b3multi | xray | gcp | datadog
+
+enum TraceScope = request | test | suite | run
+
+# Default: POST operation `login` with {username, password}, token at /token,
+# sent as `Authorization: Bearer <token>`.
+record LoginFlow:
+  # operationId on the service's contract …
+  operation?: string
+  # … or a raw POST path if there is no contract.
+  path?: string
+  # Request body; "{username}" and "{password}" in strings are replaced.
+  body?: any
+  # Send the body as a form instead of JSON.
+  form?: bool
+  # JSON pointer to the token in the response.
+  token?: string
+  # JSON pointer to the token lifetime in seconds.
+  expires_in?: string
+  header?: string
+  # Scheme before the token (Bearer); null sends the raw token.
+  scheme?: string?
+
+record Actor:
+  service?: string
+  auth?: Auth
+  headers?: map<string, string>
+  user_agent?: string
+
+# One record for all kinds; which fields apply depends on `type`.
+# Strings may reference variables: "${HUB_ADMIN_PASSWORD}".
+record Auth:
+  type: AuthType
+  # bearer
+  token?: string
+  # basic, login
+  username?: string
+  password?: string
+  # login: defaults to the actor's service
+  service?: string
+  # header
+  name?: string
+  value?: string
+  # client_credentials
+  token_url?: string
+  client_id?: string
+  client_secret?: string
+  scope?: string
+  audience?: string
+  basic_auth?: bool
+
+enum AuthType = none | bearer | basic | header | login | client_credentials

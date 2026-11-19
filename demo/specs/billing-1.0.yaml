@@ -1,0 +1,129 @@
+openapi: 3.0.3
+info:
+  title: Demo Billing API
+  version: 1.0.0
+paths:
+  /auth/token:
+    post:
+      operationId: issueToken
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [user, pass]
+              properties:
+                user: { type: string }
+                pass: { type: string }
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+        "401":
+          description: Bad credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/revoke:
+    post:
+      operationId: revokeToken
+      responses:
+        "204": { description: Revoked }
+  /invoices:
+    get:
+      operationId: listInvoices
+      parameters:
+        - { name: currency, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: All invoices
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Invoice" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    post:
+      operationId: createInvoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewInvoice" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Invalid input
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /invoices/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: getInvoice
+      responses:
+        "200":
+          description: The invoice
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      operationId: deleteInvoice
+      responses:
+        "204": { description: Deleted }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+components:
+  schemas:
+    Token:
+      type: object
+      required: [access_token, expires_in]
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer }
+    NewInvoice:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer, minimum: 1 }
+        currency: { type: string, enum: [EUR, USD] }
+        note: { type: string, nullable: true }
+    Invoice:
+      type: object
+      required: [id, amount, currency, status]
+      properties:
+        id: { type: integer }
+        amount: { type: integer }
+        currency: { type: string }
+        status: { type: string, enum: [open, paid] }
+        note: { type: string, nullable: true }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

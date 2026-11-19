@@ -1,0 +1,86 @@
+[package]
+name = "apitest"
+description = "API testing and load testing with scoped fixtures, contract pinning and Rhai/JS/Python scripting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# Lean by default: the scripting engines (QuickJS is a C build) and the
+# libtest harness (pulls clap via libtest-mimic) are opt-in.
+default = ["load", "axum"]
+## Everything, as used by the CLI and the tests in this repo
+full = ["rhai", "js", "load", "harness", "axum", "macros"]
+## Rhai scripting frontend
+rhai = ["dep:rhai"]
+## JavaScript (QuickJS) scripting frontend
+js = ["dep:rquickjs"]
+## Load-test executors, latency histograms, thresholds
+load = ["dep:hdrhistogram"]
+## `cargo test` / nextest integration via libtest-mimic
+harness = ["dep:libtest-mimic"]
+## Serve axum routers in-process for tests
+axum = ["dep:axum"]
+## #[apitest::test] / #[apitest::fixture] / #[apitest::suite] registration
+macros = ["dep:apitest-macros", "dep:linkme"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.13", features = ["json", "form", "query"] }
+jsonschema = { version = "0.61", default-features = false }
+serde_yaml_ng = "0.10"
+novafile-serde = "0.2"
+novafile-schema = "0.2"
+sha2 = "0.11"
+hdrhistogram = { version = "7.6", default-features = false, optional = true }
+rhai = { version = "1.27", features = ["sync", "serde"], optional = true }
+rquickjs = { version = "0.14", optional = true }
+libtest-mimic = { version = "0.8", optional = true }
+apitest-macros = { workspace = true, optional = true }
+linkme = { version = "0.3", optional = true }
+axum = { version = "0.8", optional = true, default-features = false, features = ["tokio", "http1"] }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["json", "form", "query"] }
+
+[[example]]
+name = "demo_server"
+required-features = ["axum"]
+
+[[example]]
+name = "billing"
+required-features = ["axum", "rhai", "js"]
+
+[[test]]
+name = "scenarios"
+required-features = ["axum", "load", "rhai", "js"]
+
+[[test]]
+name = "macro_harness"
+harness = false
+required-features = ["harness", "macros", "axum"]
+
+[[test]]
+name = "headers"
+required-features = ["axum", "rhai", "js"]
+
+[[test]]
+name = "care_flow"
+harness = false
+required-features = ["harness", "macros", "axum"]
+
+[[test]]
+name = "nextest_locks"
+harness = false
+required-features = ["harness", "macros"]
+
+[[test]]
+name = "billing_harness"
+harness = false
+required-features = ["harness", "axum", "rhai", "js"]

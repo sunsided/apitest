@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "apitest"
+version = "0.0.1"
+description = "API tests, load tests and OpenAPI contract pinning (Python bindings to the Rust core)"
+requires-python = ">=3.10"
+license = { text = "EUPL-1.2 OR MIT OR Apache-2.0" }
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "apitest._native"
+features = ["pyo3/extension-module"]
