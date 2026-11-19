@@ -1,6 +1,6 @@
 # Schema of the apitest project configuration (`apitest.nova`).
 # Every field is optional; command-line flags override the file.
-@schema apitest-config@0.2.0
+@schema apitest-config@0.2.1
 @root Config
 
 record Config:
@@ -15,8 +15,14 @@ record Config:
   test_timeout?: duration
   # Timeout of each fixture setup, hook and cleanup.
   hook_timeout?: duration
-  # Variables for env("…") / cx.env("…"); take precedence over the process environment.
+  # Defaults for env("…") / cx.env("…") / ${NAME}. Precedence, highest first:
+  # --var, the process environment, .env files, then these.
   vars?: map<string, string>
+  # .env files to read, relative to this file; later files win. Without this,
+  # .env and .env.local are read if they exist. Listed files must exist.
+  env_files?: list<string @len(1..)>
+  # Regular expressions whose matches are masked (***) in logs, errors and reports.
+  redact?: list<string @len(1..)>
   # Suite files (.rhai, .js) run by `apitest run` without arguments.
   suites?: list<string>
   reports?: Reports

@@ -1,6 +1,6 @@
 # apitest project config (NOVA). Run from this directory: apitest run
 # Schema: crates/apitest/schemas/apitest-config.novs
-@schema apitest-config@0.2.0
+@schema apitest-config@0.2.1
 
 base_url: http://127.0.0.1:8080
 lockfile: apitest.lock.nova

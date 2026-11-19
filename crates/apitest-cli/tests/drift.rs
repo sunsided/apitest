@@ -91,3 +91,13 @@ fn one_off_spec_is_checked_alone() {
     assert_eq!(o.status.code(), Some(0), "{out}\n{err}");
     assert!(out.contains("vs cli v1.1.0"), "{out}");
 }
+
+/// Drift output goes through the same masking as reports.
+#[test]
+fn drift_output_is_masked() {
+    let o = contract_check(&["--against", "qa", "--redact", r"1\.1\.0"]);
+    let (out, err) = text(&o);
+    assert_eq!(o.status.code(), Some(0), "{out}\n{err}");
+    assert!(out.contains("pinned v1.0.0 vs qa v***"), "{out}");
+    assert!(!out.contains("1.1.0"), "{out}");
+}

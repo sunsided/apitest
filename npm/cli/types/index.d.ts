@@ -100,7 +100,7 @@ declare namespace apitest {
     get<T = any>(key: string): T;
     /** Stores a JSON-serializable value in the current scope. */
     set(key: string, value: unknown): void;
-    /** A `--var` or environment variable; throws if missing and no default is given. */
+    /** A variable (`--var`, the environment, `.env` files, then `vars:`); throws if missing and no default is given. */
     env(key: string, defaultValue?: string): string;
     /** Default header for every request from this scope and its children. */
     header(name: string, value: string | number): void;

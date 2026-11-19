@@ -359,26 +359,26 @@ impl Ctx {
         Ok(())
     }
 
-    /// Reads a variable: `--var` / [`RunConfig::vars`] first, then the process environment.
+    /// Reads a variable: `--var`, then the process environment, then `.env`
+    /// files, then `vars:` (see [`RunConfig::lookup`]).
     ///
     /// # Errors
     ///
-    /// Fails when the variable is set in neither place.
+    /// Fails when the variable is set in none of them, or the environment holds
+    /// it with a value that is not valid UTF-8.
     pub fn env(&self, key: &str) -> Result<String> {
-        self.env_opt(key).ok_or_else(|| {
-            anyhow!("variable '{key}' is not set (pass --var {key}=... or export it)")
+        self.shared.config.try_lookup(key)?.ok_or_else(|| {
+            anyhow!(
+                "variable '{key}' is not set (pass --var {key}=..., export it, or add it to .env.local, .env or `vars:`)"
+            )
         })
     }
 
-    /// Like [`Ctx::env`] but optional.
+    /// Like [`Ctx::env`] but optional. A non-UTF-8 environment value reads as
+    /// `None` here.
     #[must_use]
     pub fn env_opt(&self, key: &str) -> Option<String> {
-        self.shared
-            .config
-            .vars
-            .get(key)
-            .cloned()
-            .or_else(|| std::env::var(key).ok())
+        self.shared.config.lookup(key)
     }
 
     /// Adds a header to every request made from this scope and its children.
@@ -443,10 +443,12 @@ impl Ctx {
             .ok_or_else(|| anyhow!("no contract named '{name}' is registered on this suite"))
     }
 
-    /// Prints a log line tagged with the current scope path.
+    /// Prints a log line tagged with the current scope path, with secrets and
+    /// redaction patterns masked.
     pub fn log(&self, msg: impl fmt::Display) {
         if !self.shared.config.quiet {
-            eprintln!("  [{}] {msg}", self.path());
+            let line = format!("  [{}] {msg}", self.path());
+            eprintln!("{}", self.shared.config.redactor.redact(&line));
         }
     }
 

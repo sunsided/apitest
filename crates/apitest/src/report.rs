@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use crate::contract::{DriftReport, Severity};
+use crate::redact::Redactor;
 
 /// How a test ended. Serialized as `{"status": "passed" | "failed" | "skipped", ...}`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -82,6 +83,32 @@ pub struct TestReport {
 }
 
 impl TestReport {
+    /// Masks secrets and redaction patterns in every text of the report.
+    pub fn redact(&mut self, r: &Redactor) {
+        r.redact_in_place(&mut self.name);
+        r.redact_in_place(&mut self.id);
+        match &mut self.outcome {
+            Outcome::Passed => {}
+            Outcome::Failed { message, chain } => {
+                r.redact_in_place(message);
+                for c in chain {
+                    r.redact_in_place(c);
+                }
+            }
+            Outcome::Skipped { reason } => r.redact_in_place(reason),
+        }
+
+        self.teardown_errors
+            .iter_mut()
+            .for_each(|e| r.redact_in_place(e));
+        for st in &mut self.steps {
+            r.redact_in_place(&mut st.name);
+            if let Some(e) = &mut st.error {
+                r.redact_in_place(e);
+            }
+        }
+    }
+
     /// `✓ step [12 ms]` lines, for failure messages.
     #[must_use]
     pub fn step_trail(&self) -> String {
@@ -130,6 +157,22 @@ pub struct SuiteReport {
 }
 
 impl SuiteReport {
+    /// Masks secrets and redaction patterns in every text of the report.
+    /// [`crate::run_suite`] does this before it returns.
+    pub fn redact(&mut self, r: &Redactor) {
+        r.redact_in_place(&mut self.suite);
+        self.tests.iter_mut().for_each(|t| t.redact(r));
+        if let Some(e) = &mut self.setup_error {
+            r.redact_in_place(e);
+        }
+
+        self.setup_chain
+            .iter_mut()
+            .chain(&mut self.teardown_errors)
+            .for_each(|e| r.redact_in_place(e));
+        self.drift.iter_mut().for_each(|d| d.redact(r));
+    }
+
     /// Records a suite-level setup failure together with its cause chain.
     pub fn set_setup_error(&mut self, e: &anyhow::Error) {
         self.setup_error = Some(format!("{e:#}"));

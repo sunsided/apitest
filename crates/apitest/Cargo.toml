@@ -46,6 +46,8 @@ serde-saphyr = { version = "2.2", default-features = false, features = ["deseria
 novafile-serde = "0.3"
 novafile-schema = "0.3"
 sha2 = "0.11"
+dotenvy = "0.15.7"
+regex = "1.13"
 hdrhistogram = { version = "7.6", default-features = false, optional = true }
 rhai = { version = "1.27", features = ["sync", "serde"], optional = true }
 rquickjs = { version = "0.14", optional = true }

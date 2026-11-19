@@ -111,6 +111,24 @@ impl Auth {
         }
     }
 
+    /// Every string field that may hold `${NAME}`: its path under `auth.`, its
+    /// template, and whether it holds a secret (and must be masked in output).
+    pub(crate) fn template_fields(&self) -> Vec<TemplateField<'_>> {
+        match self {
+            Auth::None => vec![],
+            Auth::Bearer { token } => vec![TemplateField::new("auth.token", token, true)],
+            Auth::Basic { username, password }
+            | Auth::Login {
+                username, password, ..
+            } => vec![
+                TemplateField::new("auth.username", username, false),
+                TemplateField::new("auth.password", password, true),
+            ],
+            Auth::Header { value, .. } => vec![TemplateField::new("auth.value", value, true)],
+            Auth::ClientCredentials(c) => c.template_fields(),
+        }
+    }
+
     /// Whether the header comes from a request to another endpoint (login or
     /// token), so it is cached and may need re-acquiring after a `401`.
     pub(crate) fn is_dynamic(&self) -> bool {
@@ -204,6 +222,27 @@ impl ClientCredentials {
     pub fn audience(mut self, audience: impl Into<String>) -> Self {
         self.audience = Some(audience.into());
         self
+    }
+
+    /// The string fields that may hold `${NAME}` (see [`Auth::template_fields`]).
+    fn template_fields(&self) -> Vec<TemplateField<'_>> {
+        let mut fields = vec![
+            TemplateField::new("auth.token_url", &self.token_url, false),
+            TemplateField::new("auth.client_id", &self.client_id, false),
+            TemplateField::new("auth.client_secret", &self.client_secret, true),
+        ];
+        fields.extend(
+            self.scope
+                .as_ref()
+                .map(|s| TemplateField::new("auth.scope", s, false)),
+        );
+        fields.extend(
+            self.audience
+                .as_ref()
+                .map(|a| TemplateField::new("auth.audience", a, false)),
+        );
+
+        fields
     }
 }
 
@@ -312,13 +351,78 @@ pub struct ActorConfig {
     pub user_agent: Option<String>,
 }
 
+impl ActorConfig {
+    /// Every string field that may hold `${NAME}` (see [`Auth::template_fields`]).
+    /// Header values count as secret: they usually carry keys or tokens.
+    pub(crate) fn template_fields(&self) -> Vec<TemplateField<'_>> {
+        let mut fields = self.auth.template_fields();
+        fields.extend(
+            self.headers.iter().map(|(name, template)| {
+                TemplateField::new(format!("headers.{name}"), template, true)
+            }),
+        );
+
+        fields
+    }
+}
+
+/// A string field of an [`Auth`] or [`ActorConfig`] that may hold `${NAME}`.
+pub(crate) struct TemplateField<'a> {
+    /// Where the field is, e.g. `auth.password` or `headers.X-Api-Key`.
+    pub(crate) path: String,
+    /// The field's value before interpolation.
+    pub(crate) template: &'a str,
+    /// Whether the resolved value is a secret that must be masked in output.
+    pub(crate) secret: bool,
+}
+
+impl<'a> TemplateField<'a> {
+    /// A field at `path` holding `template`.
+    fn new(path: impl Into<String>, template: &'a str, secret: bool) -> Self {
+        TemplateField {
+            path: path.into(),
+            template,
+            secret,
+        }
+    }
+}
+
 /// `${NAME}` → `cx.env("NAME")`; `$${` escapes a literal `${`.
 ///
 /// # Errors
 ///
-/// Fails when a `${` has no closing `}`, or when a referenced variable is set
-/// neither as a run variable nor in the environment.
+/// Fails when a `${` has no closing `}` or names no variable, or when a
+/// referenced variable is not set in any source (see [`Ctx::env`]). The error
+/// never quotes the template: it may hold a secret.
 pub fn interpolate(s: &str, cx: &Ctx) -> Result<String> {
+    interpolate_with(s, |name| cx.env(name))
+}
+
+/// The variable names `s` refers to with `${NAME}`, in order, with repeats.
+///
+/// # Errors
+///
+/// Fails like [`interpolate`] on a malformed template.
+pub(crate) fn references(s: &str) -> Result<Vec<String>> {
+    let mut names = vec![];
+    interpolate_with(s, |name| {
+        names.push(name.to_string());
+        Ok(String::new())
+    })?;
+
+    Ok(names)
+}
+
+/// `${NAME}` → `lookup("NAME")`; `$${` escapes a literal `${`.
+///
+/// # Errors
+///
+/// Fails when a `${` has no closing `}` or names no variable, or when `lookup`
+/// fails.
+pub(crate) fn interpolate_with(
+    s: &str,
+    mut lookup: impl FnMut(&str) -> Result<String>,
+) -> Result<String> {
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find("${") {
@@ -330,11 +434,16 @@ pub fn interpolate(s: &str, cx: &Ctx) -> Result<String> {
         }
 
         out.push_str(&rest[..i]);
+        let at = s.len() - rest.len() + i;
         let end = rest[i..]
             .find('}')
-            .ok_or_else(|| anyhow!("unterminated ${{ in '{s}'"))?;
+            .ok_or_else(|| anyhow!("unterminated ${{ at byte {at}"))?;
         let name = &rest[i + 2..i + end];
-        out.push_str(&cx.env(name)?);
+        if name.is_empty() {
+            bail!("empty variable name `${{}}` at byte {at}");
+        }
+
+        out.push_str(&lookup(name)?);
         rest = &rest[i + end + 1..];
     }
 
@@ -399,13 +508,46 @@ fn digest(s: &str) -> String {
 
 /// The header an [`Auth`] produces for a request. Dynamic credentials are cached;
 /// `refresh` forces a new login / token.
+///
+/// Every secret involved is registered with the run's
+/// [`Redactor`](crate::redact::Redactor) as soon as it is known: the variables
+/// behind secret fields before interpolation can fail, the resolved secrets, and
+/// the header value. The header is registered after the credential cache, which
+/// outlives runs, so a run that gets a cached token still masks it.
 pub(crate) async fn resolve(
     cx: &Ctx,
     auth: &Auth,
     refresh: bool,
 ) -> Result<Option<(String, String)>> {
+    let redactor = &cx.config().redactor;
+    register_secret_variables(cx, auth);
     let auth = auth.interpolated(cx)?;
-    match &auth {
+    for f in auth.template_fields().iter().filter(|f| f.secret) {
+        redactor.secret(f.template);
+    }
+
+    let header = resolve_header(cx, &auth, refresh).await?;
+    if let Some((_, value)) = &header {
+        redactor.header_value(value);
+    }
+
+    Ok(header)
+}
+
+/// Registers the values of the variables that `auth`'s secret fields refer to.
+fn register_secret_variables(cx: &Ctx, auth: &Auth) {
+    for f in auth.template_fields().iter().filter(|f| f.secret) {
+        for name in references(f.template).unwrap_or_default() {
+            if let Some(v) = cx.env_opt(&name) {
+                cx.config().redactor.secret(&v);
+            }
+        }
+    }
+}
+
+/// The header an interpolated [`Auth`] produces (see [`resolve`]).
+async fn resolve_header(cx: &Ctx, auth: &Auth, refresh: bool) -> Result<Option<(String, String)>> {
+    match auth {
         Auth::None => Ok(None),
         Auth::Bearer { token } => Ok(Some(("Authorization".into(), format!("Bearer {token}")))),
         Auth::Basic { username, password } => Ok(Some(basic_header(username, password))),
@@ -712,5 +854,18 @@ mod tests {
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["type"], "login");
         assert_eq!(serde_json::from_value::<Auth>(v).unwrap(), a);
+    }
+
+    #[test]
+    fn templates_name_their_variables_and_errors_quote_nothing() {
+        assert_eq!(
+            references("Bearer ${T}-${U}-$${LITERAL}-${T}").unwrap(),
+            ["T", "U", "T"]
+        );
+        let unterminated = references("hunter2${OPEN").unwrap_err().to_string();
+        assert_eq!(unterminated, "unterminated ${ at byte 7");
+        let empty = references("hunter2${}").unwrap_err().to_string();
+        assert!(empty.contains("empty variable name"), "{empty}");
+        assert!(!empty.contains("hunter2"), "{empty}");
     }
 }

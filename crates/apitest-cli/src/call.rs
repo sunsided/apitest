@@ -34,7 +34,7 @@ use serde_json::Value;
 use apitest::config::ProjectConfig;
 use apitest::http::{RequestOpts, Response};
 use apitest::runner::RunConfig;
-use apitest::{Ctx, load};
+use apitest::{Ctx, Redactor, load};
 
 use crate::RequestFlags;
 
@@ -75,7 +75,7 @@ pub struct Args {
     /// Project config (default: apitest.nova in the current directory or a parent).
     #[arg(long, short = 'c')]
     config: Option<PathBuf>,
-    /// Variables, User-Agent and tracing.
+    /// Variables, redaction, User-Agent and tracing.
     #[command(flatten)]
     request: RequestFlags,
 }
@@ -108,34 +108,42 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
 ///
 /// Fails on a missing or broken config, a refused request (see [`target`] and
 /// [`actor`]), an unreadable body, a failed login, a connection error, a
-/// timeout, or when stdout cannot be written.
-pub async fn call(a: Args) -> Result<bool> {
-    let (cfg, source) = run_config(&a)?;
+/// timeout, an unresolved variable of the `--as` actor, or when stdout cannot
+/// be written.
+///
+/// Everything written is masked with `redactor`: the response, the `-v`
+/// summary and the messages, like the reports of `apitest run`.
+pub async fn call(a: Args, redactor: &Redactor) -> Result<bool> {
+    let (mut cfg, source) = run_config(&a, redactor)?;
     target::check_request(&a.method, &a.path)?;
     target::check_service(&cfg, &a.service, &source)?;
     if let Some(name) = &a.actor {
         actor::check(&cfg, name, &a.service, &a.header)?;
     }
 
+    // Only the actor this call uses must resolve: an unrelated actor's missing
+    // secret doesn't block a one-off request.
+    cfg.actors.retain(|name, _| a.actor.as_ref() == Some(name));
     let opts = request_opts(&a)?;
     let resp = send(&cfg, &a, opts).await?;
     if a.verbose {
-        eprint!("{}", output::summary(&resp, &cfg, a.actor.as_deref()));
+        let summary = output::summary(&resp, &cfg, a.actor.as_deref());
+        eprint!("{}", redactor.redact(&summary));
     }
 
-    output::write_response(&resp, a.include)?;
+    output::write_response(&resp, a.include, redactor)?;
 
-    Ok(status_ok(&resp, a.expect))
+    Ok(status_ok(&resp, a.expect, redactor))
 }
 
-/// Loads the project config and layers the request flags over it. Also returns
-/// the config file's path for messages.
+/// Loads the project config and layers the request flags over it, masking
+/// with `redactor`. Also returns the config file's path for messages.
 ///
 /// # Errors
 ///
-/// Fails when no `apitest.nova` is found or given, it cannot be parsed, or a
-/// flag is invalid.
-fn run_config(a: &Args) -> Result<(RunConfig, String)> {
+/// Fails when no `apitest.nova` is found or given, it cannot be parsed, a
+/// flag is invalid or a `.env` file is broken.
+fn run_config(a: &Args, redactor: &Redactor) -> Result<(RunConfig, String)> {
     let project = match &a.config {
         Some(p) => ProjectConfig::load(p)?,
         None => ProjectConfig::discover(&std::env::current_dir()?)?.ok_or_else(|| {
@@ -151,8 +159,12 @@ fn run_config(a: &Args) -> Result<(RunConfig, String)> {
         .clone()
         .unwrap_or_else(|| project.root.join("apitest.nova"));
 
-    let mut cfg = project.apply(RunConfig::default());
-    a.request.apply(&mut cfg)?;
+    let base = RunConfig {
+        redactor: redactor.clone(),
+        ..RunConfig::default()
+    };
+    let mut cfg = project.apply(base)?;
+    a.request.apply(&mut cfg, Some(&project))?;
 
     Ok((cfg, source.display().to_string()))
 }
@@ -201,8 +213,8 @@ async fn send(cfg: &RunConfig, a: &Args, opts: RequestOpts) -> Result<Response> 
 
 /// Whether the status is the `--expect`ed one (default: any 2xx). Says on
 /// stderr what was expected when it is not, and where an unfollowed redirect
-/// pointed.
-fn status_ok(resp: &Response, expect: Option<u16>) -> bool {
+/// pointed (masked with `redactor`).
+fn status_ok(resp: &Response, expect: Option<u16>, redactor: &Redactor) -> bool {
     let ok = expect.map_or((200..300).contains(&resp.status), |s| resp.status == s);
     if !ok {
         let wanted = expect.map_or_else(|| "2xx".to_string(), |s| s.to_string());
@@ -211,7 +223,10 @@ fn status_ok(resp: &Response, expect: Option<u16>) -> bool {
 
     // Only redirects to another origin come back unfollowed (see `Ctx::standalone`).
     if let (301..=303 | 307 | 308, Some(location)) = (resp.status, resp.header("location")) {
-        eprintln!("redirect to {location} not followed: it leaves the service's origin");
+        eprintln!(
+            "redirect to {} not followed: it leaves the service's origin",
+            redactor.redact(location)
+        );
     }
 
     ok

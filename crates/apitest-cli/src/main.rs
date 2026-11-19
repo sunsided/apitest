@@ -8,6 +8,7 @@
 
 mod call;
 mod drift;
+mod vars;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,6 +20,7 @@ use apitest::config::ProjectConfig;
 use apitest::contract::{Contract, DriftReport, Spec};
 use apitest::diagnostic;
 use apitest::load::{Executor, LoadPlan, Scenario, Stage, Threshold, parse_duration, run_load};
+use apitest::redact::Redactor;
 use apitest::report::junit_xml;
 use apitest::runner::{RunConfig, check_drift, run_suite};
 use apitest::script::{LoadOptions, load_suites};
@@ -59,7 +61,7 @@ struct Common {
     /// Suppress `cx.log()` output.
     #[arg(long, short = 'q')]
     quiet: bool,
-    /// Variables, User-Agent and tracing.
+    /// Variables, redaction, User-Agent and tracing.
     #[command(flatten)]
     request: RequestFlags,
 }
@@ -67,9 +69,9 @@ struct Common {
 /// Request-level options shared by every subcommand that sends requests.
 #[derive(Args, Clone)]
 struct RequestFlags {
-    /// Variable for `cx.env()` and `${NAME}` in the config, e.g. --var `API_USER=demo` (repeatable).
-    #[arg(long = "var", value_parser = parse_kv)]
-    vars: Vec<(String, String)>,
+    /// Variables, `.env` files and redaction.
+    #[command(flatten)]
+    vars: vars::Flags,
     /// User-Agent for every request (default: from the config, else `apitest/<version>`).
     #[arg(long)]
     user_agent: Option<String>,
@@ -82,13 +84,15 @@ struct RequestFlags {
 }
 
 impl RequestFlags {
-    /// Layers the flags over `cfg`: vars are added, the rest replace the config.
+    /// Layers the flags over `cfg`: variables, `.env` files and redaction
+    /// patterns are added (see [`vars::Flags::apply`]), the rest replace the config.
     ///
     /// # Errors
     ///
-    /// Fails on an unknown `--trace-format`.
-    fn apply(&self, cfg: &mut RunConfig) -> Result<()> {
-        cfg.vars.extend(self.vars.iter().cloned());
+    /// Fails on an invalid `--redact` pattern, a broken `.env` file or an
+    /// unknown `--trace-format`.
+    fn apply(&self, cfg: &mut RunConfig, project: Option<&ProjectConfig>) -> Result<()> {
+        self.vars.apply(cfg, project)?;
         if let Some(ua) = &self.user_agent {
             cfg.user_agent.clone_from(ua);
         }
@@ -199,9 +203,9 @@ enum ContractCmd {
     Check {
         /// Suite files (.rhai, .js). Default: `suites` from the config.
         files: Vec<PathBuf>,
-        /// Shared options.
+        /// Shared options (boxed: they dwarf `Diff`).
         #[command(flatten)]
-        common: Common,
+        common: Box<Common>,
     },
     /// Diff two spec files (pinned → candidate), e.g. in CI before deploying.
     Diff {
@@ -234,15 +238,25 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    match rt.block_on(run(cli)) {
+    // Shared with every run config, so the final error is masked with all the
+    // secrets and patterns the run learned.
+    let redactor = Redactor::default();
+    match rt.block_on(run(cli, &redactor)) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
             let color = diagnostic::use_color(&std::io::stderr());
-            eprint!("{}", diagnostic::render_error(&e, color));
+            eprint!("{}", render_error(&e, &redactor, color));
             ExitCode::from(2)
         }
     }
+}
+
+/// An error and its causes as a miette diagnostic, each link masked.
+fn render_error(e: &anyhow::Error, redactor: &Redactor, color: bool) -> String {
+    let chain: Vec<String> = e.chain().map(|c| redactor.redact(&c.to_string())).collect();
+
+    diagnostic::render_chain(&redactor.redact(&format!("{e:#}")), &chain, color)
 }
 
 /// Loads the project config from `--config`, or discovers `apitest.nova`
@@ -255,11 +269,19 @@ fn project(common: &Common) -> Result<Option<ProjectConfig>> {
 }
 
 /// Builds the run configuration: defaults, then the project config, then the
-/// command-line flags, each layer overriding the previous one.
-fn run_config(common: &Common, project: Option<&ProjectConfig>) -> Result<RunConfig> {
-    let mut cfg = RunConfig::default();
+/// command-line flags, each layer overriding the previous one. The config
+/// masks output with `redactor`.
+fn run_config(
+    common: &Common,
+    project: Option<&ProjectConfig>,
+    redactor: &Redactor,
+) -> Result<RunConfig> {
+    let mut cfg = RunConfig {
+        redactor: redactor.clone(),
+        ..RunConfig::default()
+    };
     if let Some(p) = project {
-        cfg = p.apply(cfg);
+        cfg = p.apply(cfg)?;
         if cfg.lockfile.is_none() {
             cfg.lockfile = Some(p.root.join("apitest.lock.nova"));
         }
@@ -276,7 +298,7 @@ fn run_config(common: &Common, project: Option<&ProjectConfig>) -> Result<RunCon
     cfg.check_drift = !common.no_drift_check;
     common.drift.apply(&mut cfg)?;
     cfg.quiet = common.quiet;
-    common.request.apply(&mut cfg)?;
+    common.request.apply(&mut cfg, project)?;
 
     Ok(cfg)
 }
@@ -326,15 +348,16 @@ fn write(path: &Path, content: &str) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Runs a subcommand; `Ok(false)` means it ran but something failed.
-async fn run(cli: Cli) -> Result<bool> {
+/// Runs a subcommand; `Ok(false)` means it ran but something failed. Output
+/// is masked with `redactor`.
+async fn run(cli: Cli, redactor: &Redactor) -> Result<bool> {
     match cli.cmd {
-        Cmd::Run(args) => run_tests(args).await,
-        Cmd::Load(args) => run_load_test(args).await,
-        Cmd::Call(args) => call::call(args).await,
+        Cmd::Run(args) => run_tests(args, redactor).await,
+        Cmd::Load(args) => run_load_test(args, redactor).await,
+        Cmd::Call(args) => call::call(args, redactor).await,
         Cmd::Contract {
             cmd: ContractCmd::Check { files, common },
-        } => contract_check(&files, &common).await,
+        } => contract_check(&files, &common, redactor).await,
         Cmd::Contract {
             cmd:
                 ContractCmd::Diff {
@@ -347,10 +370,12 @@ async fn run(cli: Cli) -> Result<bool> {
 }
 
 /// `apitest run`: runs every suite, prints the reports and writes the
-/// requested `JUnit`/JSON files.
-async fn run_tests(args: RunArgs) -> Result<bool> {
+/// requested `JUnit`/JSON files. Every variable the configured actors use must
+/// resolve before any suite starts.
+async fn run_tests(args: RunArgs, redactor: &Redactor) -> Result<bool> {
     let project = project(&args.common)?;
-    let mut cfg = run_config(&args.common, project.as_ref())?;
+    let mut cfg = run_config(&args.common, project.as_ref(), redactor)?;
+    cfg.check_variables()?;
     cfg.only = args.only;
     cfg.update_lock = args.update_lock;
     if let Some(n) = args.max_parallel {
@@ -402,9 +427,11 @@ async fn run_tests(args: RunArgs) -> Result<bool> {
 }
 
 /// `apitest load`: runs one test as a load scenario and checks its thresholds.
-async fn run_load_test(args: LoadArgs) -> Result<bool> {
+/// Every variable the configured actors use must resolve first.
+async fn run_load_test(args: LoadArgs, redactor: &Redactor) -> Result<bool> {
     let project = project(&args.common)?;
-    let mut cfg = run_config(&args.common, project.as_ref())?;
+    let mut cfg = run_config(&args.common, project.as_ref(), redactor)?;
+    cfg.check_variables()?;
     cfg.validate_every = args.validate_every;
     cfg.quiet = true;
 
@@ -495,18 +522,21 @@ fn pick_suite(mut suites: Vec<Suite>, name: Option<&str>) -> Result<Suite> {
 }
 
 /// `apitest contract check`: diffs each suite's live specs against their pins.
-async fn contract_check(files: &[PathBuf], common: &Common) -> Result<bool> {
+/// Target URLs, versions and findings are masked like reports.
+async fn contract_check(files: &[PathBuf], common: &Common, redactor: &Redactor) -> Result<bool> {
     let project = project(common)?;
-    let cfg = run_config(common, project.as_ref())?;
+    let cfg = run_config(common, project.as_ref(), redactor)?;
     let suites = load_all(files, project.as_ref(), &LoadOptions::default())?;
     drift::check_targets(&cfg, &suites, extra_project(files, project.as_ref()))?;
 
     let mut ok = true;
     for s in &suites {
-        for d in check_drift(&s.contracts, &cfg).await? {
+        let name = redactor.redact(&s.name);
+        for mut d in check_drift(&s.contracts, &cfg).await? {
+            d.redact(redactor);
             println!(
                 "{} / {}: pinned v{} vs {} v{} ({}) → {}",
-                s.name,
+                name,
                 d.contract,
                 d.pinned_version,
                 d.target,
@@ -555,5 +585,16 @@ fn print_findings(d: &DriftReport) {
             "  {:?} {} @ {}: {}",
             f.severity, f.operation, f.location, f.message
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn flags_of_every_subcommand_are_consistent() {
+        // Catches clashing flag and group names, which clap only reports at runtime.
+        super::Cli::command().debug_assert();
     }
 }

@@ -243,10 +243,90 @@ fn missing_credentials_name_the_variable() {
     let dir = project(&serve(), LOGIN_FLOW);
     let o = apitest(&dir, &["hub", "GET", "/me", "--as", "hub_admin"]);
     assert_eq!(o.status.code(), Some(2));
+    // Checked before the request, all at once, with the fields that use them.
+    let err = stderr(&o);
     assert!(
-        stderr(&o).contains("variable 'HUB_USER' is not set"),
+        err.contains("HUB_USER (used by actors.hub_admin.auth.username)"),
+        "{err}"
+    );
+    assert!(
+        err.contains("HUB_PASSWORD (used by actors.hub_admin.auth.password)"),
+        "{err}"
+    );
+}
+
+#[test]
+fn credentials_from_env_files_and_redaction_patterns() {
+    let dir = project(&serve(), LOGIN_FLOW);
+    std::fs::write(dir.join(".env"), "HUB_USER=admin@hub.test\n").unwrap();
+    std::fs::write(dir.join(".env.local"), "HUB_PASSWORD=s3cret\n").unwrap();
+
+    // The user comes from .env, the password from .env.local.
+    let args = ["hub", "GET", "/me", "--as", "hub_admin"];
+    let o = apitest(&dir, &[&args[..], &["--redact", "adm[a-z]+"]].concat());
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    // {"user":"admin"}: the pattern masks the body on stdout too.
+    assert_eq!(stdout(&o), r#"{"user":"***"}"#);
+
+    // --no-env-file reads neither file, so the variables are missing.
+    let o = apitest(&dir, &[&args[..], &["--no-env-file"]].concat());
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("HUB_PASSWORD (used by"),
         "{}",
         stderr(&o)
+    );
+
+    // --env-file replaces the project's files and must exist.
+    std::fs::write(
+        dir.join("ci.env"),
+        "HUB_USER=admin@hub.test\nHUB_PASSWORD=s3cret\n",
+    )
+    .unwrap();
+    let o = apitest(&dir, &[&args[..], &["--env-file", "ci.env"]].concat());
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = apitest(&dir, &[&args[..], &["--env-file", "nope.env"]].concat());
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("nope.env: file not found"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn env_file_errors_and_secrets_never_reach_the_terminal() {
+    let dir = project(&serve(), LOGIN_FLOW);
+    std::fs::write(dir.join(".env"), "HUB_USER='hunter2-unterminated\n").unwrap();
+    let o = apitest(&dir, &["hub", "GET", "/me", "--as", "hub_admin"]);
+    assert_eq!(o.status.code(), Some(2));
+    let err = stderr(&o);
+    assert!(err.contains("parsing") && err.contains(".env"), "{err}");
+    assert!(!err.contains("hunter2"), "{err}");
+
+    // A wrong password: the final error is masked too, here the login
+    // response body "bad credentials" through a pattern.
+    std::fs::write(
+        dir.join(".env"),
+        "HUB_USER=admin@hub.test\nHUB_PASSWORD=wrong-pass\n",
+    )
+    .unwrap();
+    let args = [
+        "hub",
+        "GET",
+        "/me",
+        "--as",
+        "hub_admin",
+        "--redact",
+        "cred[a-z]+",
+    ];
+    let o = apitest(&dir, &args);
+    assert_eq!(o.status.code(), Some(2));
+    let err = stderr(&o);
+    assert!(err.contains("status 401: bad ***"), "{err}");
+    assert!(
+        !err.contains("credentials") && !err.contains("wrong-pass"),
+        "{err}"
     );
 }
 
@@ -261,6 +341,7 @@ fn without_as_no_credentials_are_sent() {
 
 #[test]
 fn sends_headers_query_and_json() {
+    // hub_admin's HUB_USER / HUB_PASSWORD are unset: only the `--as` actor must resolve.
     let dir = project(&serve(), "");
     let v = echo_json(
         &dir,
@@ -282,7 +363,9 @@ fn sends_headers_query_and_json() {
     assert_eq!(v["body"], r#"{"a":1}"#);
     assert_eq!(v["content_type"], "application/json");
     assert_eq!(v["tenant"], "42");
-    assert_eq!(v["api_key"], "k-123");
+    // The service echoes the actor's API key and stdout masks it. Only the exact
+    // registered value is masked, so "***" also shows that "k-123" was sent.
+    assert_eq!(v["api_key"], "***");
     assert_eq!(v["authorization"], Value::Null);
 }
 
