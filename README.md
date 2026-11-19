@@ -121,12 +121,7 @@ async fn social_worker(hub_admin: Actor) -> Result<Actor> {
         .call("createUser")
         .json(json!({ "email": email, "password": PASSWORD, "role": "social_service" }))
         .expect(201)
-        .rollback(|user| {
-            hub_admin
-                .call("deleteUser")
-                .path("id", &user["id"])
-                .expect(204)
-        })
+        .rollback(|user| hub_admin.call("deleteUser").path("id", &user["id"]).expect(204))
         .await?;
 
     Ok(Actor::on("hub").login(email, PASSWORD)) // logs in lazily on first use
@@ -179,12 +174,7 @@ async fn patient_onboarding(social_worker: Actor) -> Result<()> {
             .call("identifyPatient")
             .json(json!({ "activation_code": code }))
             .expect(201)
-            .rollback(|case| {
-                social_worker
-                    .call("deleteCase")
-                    .path("id", &case["id"])
-                    .expect(204)
-            }),
+            .rollback(|case| social_worker.call("deleteCase").path("id", &case["id"]).expect(204)),
     )
     .await?;
 
@@ -297,8 +287,8 @@ Actor::on("hub").bearer(token)                         // Authorization: Bearer 
 Actor::on("hub").basic("user", "pw")                   // Authorization: Basic …
 Actor::on("hub").api_key("X-Api-Key", key)             // any header
 Actor::on("hub").login("admin@hub.test", "secret")     // via the service's login flow, lazily
-Actor::on("reports")                                   // OAuth2 client credentials
-    .client_credentials(ClientCredentials::new(token_url, id, secret).scope("reports.read"))
+// OAuth2 client credentials
+Actor::on("reports").client_credentials(ClientCredentials::new(token_url, id, secret).scope("reports.read"))
 actor("hub_admin")?                                    // named actor from apitest.nova / RunConfig
 cx.bearer(token);                                      // every request in this scope without its own auth
 ```
