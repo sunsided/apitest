@@ -1,6 +1,6 @@
 ---
 title: Contracts and drift
-applyTo: "crates/apitest/src/contract.rs,crates/apitest/src/http.rs,crates/apitest/src/runner.rs,crates/apitest/schemas/**,demo/specs/**"
+applyTo: "crates/apitest/src/contract.rs,crates/apitest/src/contract/**,crates/apitest/src/runner/drift.rs,crates/apitest-cli/src/drift.rs,crates/apitest/src/http.rs,crates/apitest/src/runner.rs,crates/apitest/schemas/**,demo/specs/**"
 summary: OpenAPI loading treats specs as untrusted, drift is judged from the client's side, the lockfile records only the used surface.
 ---
 
