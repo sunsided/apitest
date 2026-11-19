@@ -150,14 +150,19 @@ proptest! {
         let lower = raw.trim().to_ascii_lowercase();
         let is_url = lower.starts_with("http://") || lower.starts_with("https://");
 
-        match SpecSource::parse(&raw, std::path::Path::new("/root")) {
+        // An absolute base on every platform: "/root" has no drive letter on Windows.
+        let base = std::env::temp_dir();
+
+        match SpecSource::parse(&raw, &base) {
             SpecSource::Url(u) => {
                 prop_assert!(is_url, "{raw:?} became URL {u:?}");
                 prop_assert_eq!(u, raw.trim());
             }
             SpecSource::File(p) => {
                 prop_assert!(!is_url, "{raw:?} became file {p:?}");
-                prop_assert!(p.is_absolute(), "{p:?}");
+                let typed = std::path::Path::new(raw.trim());
+                let expected = if typed.is_absolute() { typed.to_path_buf() } else { base.join(typed) };
+                prop_assert_eq!(p, expected);
             }
             SpecSource::Document(_) => prop_assert!(false, "parsed into a document"),
         }
