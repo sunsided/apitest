@@ -609,3 +609,17 @@ Each scenario checks `GET /_stats` afterwards to prove that no tokens or invoice
 - **Ctrl-C.** Cleanups currently run on normal completion, failures, panics and timeouts, but not on SIGINT. That needs a cancellation token threaded through the runner.
 - **Type-safe Rust clients.** Generating progenitor clients from the pinned spec would add compile-time pinning on top of the runtime check.
 - **NOVA schemas.** Ship `.novs` schemas for `apitest.nova` and the lockfile so editors can validate them.
+
+## License
+
+Licensed under any of
+
+- European Union Public Licence, Version 1.2 ([LICENSES/EUPL-1.2.txt](https://github.com/sunsided/apitest/blob/main/LICENSES/EUPL-1.2.txt))
+- MIT license ([LICENSES/MIT.txt](https://github.com/sunsided/apitest/blob/main/LICENSES/MIT.txt))
+- Apache License, Version 2.0 ([LICENSES/Apache-2.0.txt](https://github.com/sunsided/apitest/blob/main/LICENSES/Apache-2.0.txt))
+
+at your option. The examples (`crates/*/examples/`) and the demo project (`demo/`) are public domain
+([CC0-1.0](https://github.com/sunsided/apitest/blob/main/LICENSES/CC0-1.0.txt)), so you can copy them into anything.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this work by you
+shall be licensed as above, without any additional terms or conditions.

@@ -1,0 +1,15 @@
+version = 1
+
+# Default: everything under the project license expression.
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Markus Mayer"
+SPDX-License-Identifier = "EUPL-1.2 OR MIT OR Apache-2.0"
+
+# Examples and the demo project are public domain so readers can copy them freely.
+[[annotations]]
+path = ["crates/*/examples/**", "demo/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Markus Mayer"
+SPDX-License-Identifier = "CC0-1.0"
