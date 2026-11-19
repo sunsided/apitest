@@ -1,76 +1,228 @@
+# Keep in sync with `task ci` in the Taskfile. Job `name:`s are the required status checks.
 name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  NEXTEST_NO_TESTS: warn
 
 jobs:
-  rust:
+  branch:
+    name: branch name
+    # Runs on PRs and merge queues (detached HEAD passes) so it can be a required check.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --features apitest/full -- -D warnings
-      - run: cargo build -p apitest --no-default-features
-      - run: cargo build -p apitest
-      - run: cargo build -p apitest-cli
-      - run: cargo test -p apitest --features full
+          persist-credentials: false
+      - run: sh scripts/check-branch.sh "$HEAD_REF" github
         env:
-          APITEST_JUNIT: target/apitest/junit.xml
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: junit
-          path: target/apitest/junit.xml
+          HEAD_REF: ${{ github.head_ref }}
 
-  nextest:
+  fmt:
+    name: rustfmt
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  style:
+    name: style (separators, README links, typos, review index)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: No `// ----` separator comments
+        run: "! grep -rnE --include='*.rs' --exclude-dir=target --exclude-dir=.git '^[[:space:]]*//+[[:space:]]*[-=*#~_/]{4,}' ."
+      - name: Absolute URLs in README files
+        run: "! grep -rnoE --include='README.md' --exclude-dir=target --exclude-dir=.git --exclude-dir=review --exclude-dir=node_modules '(\\]\\(|src=\")[^)\"]*' . | grep -vE ':(\\]\\(|src=\")(https?://|#|mailto:)'"
+      - name: Typos
+        uses: crate-ci/typos@v1
+      - name: Review index is current
+        run: python3 scripts/review-index.py --check
+
+  doc:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
-      # Process-per-test: exercises the cross-process serial/resource locks.
-      - run: cargo nextest run -p apitest --features full --test macro_harness --test nextest_locks --test billing_harness --test care_flow --test-threads 8
+      - run: cargo doc --workspace --all-features --no-deps --document-private-items
+
+  # nextest runs one process per test, which also exercises the cross-process serial/resource locks.
+  # apitest-py is excluded: its pyo3 test binary cannot link without libpython (see the python job).
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --workspace --exclude apitest-py --all-features
+      - run: cargo test --workspace --exclude apitest-py --all-features --doc
+
+  features:
+    name: feature combinations
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - run: cargo hack check -p apitest --each-feature --no-dev-deps
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - run: cargo llvm-cov nextest --workspace --exclude apitest-py --all-features --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+          # OIDC everywhere except fork PRs, which get no id-token and upload tokenless instead.
+          use_oidc: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - run: cargo hack check --rust-version --workspace --all-targets --ignore-private
 
   npm:
+    name: npm package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Type-check the JS demo suite against the published declarations
-        run: npx -y -p typescript@5.8.3 tsc -p demo/suites/jsconfig.json
-      - name: Pack and run through the launcher
-        run: |
-          cargo build -p apitest-cli
-          node npm/scripts/build-platform-package.mjs --target x86_64-unknown-linux-gnu --binary target/debug/apitest --out "$RUNNER_TEMP/dist"
-          (cd npm/cli && npm pack --pack-destination "$RUNNER_TEMP")
-          (cd "$RUNNER_TEMP/dist/cli-linux-x64-gnu" && npm pack --pack-destination "$RUNNER_TEMP")
-          mkdir "$RUNNER_TEMP/proj" && cd "$RUNNER_TEMP/proj" && npm init -y
-          npm i --omit=optional "$RUNNER_TEMP"/apitest-cli-0.0.1.tgz "$RUNNER_TEMP"/apitest-cli-linux-x64-gnu-0.0.1.tgz
-          npx apitest --version
-          npx apitest contract diff "$GITHUB_WORKSPACE/demo/specs/billing-1.0.yaml" "$GITHUB_WORKSPACE/demo/specs/billing-1.1.yaml"
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task npm:check
+      - run: task npm:smoke
 
   python:
+    name: python bindings
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: cargo build -p apitest --example demo_server
-      - run: python -m venv .venv && .venv/bin/pip install maturin pytest
-      - run: . .venv/bin/activate && cd crates/apitest-py && maturin develop && pytest -v
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task py:test

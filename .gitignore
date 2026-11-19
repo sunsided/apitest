@@ -7,3 +7,4 @@ crates/apitest-py/python/apitest/*.so
 node_modules/
 npm/dist/
 *.tgz
+lcov.info
