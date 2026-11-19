@@ -211,25 +211,27 @@ async fn send(cfg: &RunConfig, a: &Args, opts: RequestOpts) -> Result<Response> 
     })?
 }
 
-/// Whether the status is the `--expect`ed one (default: any 2xx). Says on
-/// stderr what was expected when it is not, and where an unfollowed redirect
+/// Whether the status is the `--expect`ed one (default: any 2xx). When it is
+/// not, says on stderr what was expected and where an unfollowed redirect
 /// pointed (masked with `redactor`).
 fn status_ok(resp: &Response, expect: Option<u16>, redactor: &Redactor) -> bool {
     let ok = expect.map_or((200..300).contains(&resp.status), |s| resp.status == s);
-    if !ok {
-        let wanted = expect.map_or_else(|| "2xx".to_string(), |s| s.to_string());
-        eprintln!("status {} (expected {wanted})", resp.status);
+    if ok {
+        return true;
     }
 
-    // Only redirects to another origin come back unfollowed (see `Ctx::standalone`).
-    if let (301..=303 | 307 | 308, Some(location)) = (resp.status, resp.header("location")) {
+    let wanted = expect.map_or_else(|| "2xx".to_string(), |s| s.to_string());
+    eprintln!("status {} (expected {wanted})", resp.status);
+    if let (301..=303 | 307 | 308, Some(location)) = (resp.status, resp.header("location"))
+        && !location.is_empty()
+    {
         eprintln!(
-            "redirect to {} not followed: it leaves the service's origin",
+            "redirect to {} not followed (only redirects within the service's origin are)",
             redactor.redact(location)
         );
     }
 
-    ok
+    false
 }
 
 #[cfg(test)]

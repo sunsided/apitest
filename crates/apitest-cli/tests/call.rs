@@ -75,9 +75,14 @@ async fn binary() -> impl IntoResponse {
     ([("content-type", "application/octet-stream")], BINARY)
 }
 
-/// `GET /hop`: a same-origin redirect to `/status/204`.
+/// `GET /hop`: a same-origin redirect to [`echo`].
 async fn hop() -> Redirect {
-    Redirect::to("/status/204")
+    Redirect::to("/echo")
+}
+
+/// `GET /loop`: a same-origin redirect to itself, forever.
+async fn redirect_loop() -> Redirect {
+    Redirect::to("/loop")
 }
 
 /// The test service, redirecting `/away` to `away` (another origin).
@@ -90,6 +95,7 @@ fn app(away: &str) -> Router {
         .route("/status/{n}", get(status))
         .route("/slow", get(slow))
         .route("/hop", get(hop))
+        .route("/loop", get(redirect_loop))
         .route("/binary", get(binary))
         .route("/away", get(move || async move { Redirect::to(&away) }))
 }
@@ -524,10 +530,35 @@ fn verbose_redacts_headers_from_the_actor_config() {
 }
 
 #[test]
-fn same_origin_redirects_are_followed() {
+fn same_origin_redirects_keep_the_actors_credentials() {
+    let dir = project(&serve(), LOGIN_FLOW);
+    let v = echo_json(&dir, &["hub", "GET", "/hop", "--as", "monitor"]);
+    // Stdout masks the registered key, so "***" shows it was sent after the hop.
+    assert_eq!(v["api_key"], "***");
+
+    let v = echo_json(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/hop",
+            "--as",
+            "hub_admin",
+            "--var",
+            "HUB_USER=admin@hub.test",
+            "--var",
+            "HUB_PASSWORD=s3cret",
+        ],
+    );
+    assert_eq!(v["authorization"], "***");
+}
+
+#[test]
+fn redirect_loops_stop_after_ten_hops() {
     let dir = project(&serve(), "");
-    let o = apitest(&dir, &["hub", "GET", "/hop", "--as", "monitor"]);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = apitest(&dir, &["hub", "GET", "/loop"]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("too many redirects"), "{}", stderr(&o));
 }
 
 #[test]
@@ -567,4 +598,12 @@ fn binary_bodies_are_written_byte_for_byte() {
         "{}",
         stdout(&o)
     );
+}
+
+#[test]
+fn an_expected_redirect_is_not_reported() {
+    let dir = project(&serve(), "");
+    let o = apitest(&dir, &["hub", "GET", "/away", "--expect", "303"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stderr(&o), "");
 }
