@@ -30,10 +30,10 @@ API testing and load testing in Rust, with:
 - [Authentication](#authentication)
 - [Tracing and headers](#tracing-and-headers)
 - [The same suite in four languages](#the-same-suite-in-four-languages)
-  - [Rust](#rust)
-  - [Rhai](#rhai)
-  - [JavaScript](#javascript)
-  - [Python](#python)
+  - [Rust suite](#rust-suite)
+  - [Rhai suite](#rhai-suite)
+  - [JavaScript suite](#javascript-suite)
+  - [Python suite](#python-suite)
   - [Per-test setup and teardown](#per-test-setup-and-teardown)
 - [Contract pinning](#contract-pinning)
 - [Using it as a library (axum example)](#using-it-as-a-library-axum-example)
@@ -41,7 +41,7 @@ API testing and load testing in Rust, with:
   - [nextest](#nextest)
 - [CLI](#cli)
 - [Load testing](#load-testing)
-- [Python](#python-1)
+- [Python bindings](#python-bindings)
 - [Tests](#tests)
 - [npm](#npm)
 - [Open questions / next steps](#open-questions--next-steps)
@@ -292,10 +292,10 @@ Actor::on("hub").bearer(token)                         // Authorization: Bearer 
 Actor::on("hub").basic("user", "pw")                   // Authorization: Basic …
 Actor::on("hub").api_key("X-Api-Key", key)             // any header
 Actor::on("hub").login("admin@hub.test", "secret")     // via the service's login flow, lazily
-// OAuth2 client credentials
-Actor::on("reports").client_credentials(ClientCredentials::new(token_url, id, secret).scope("reports.read"))
+let creds = ClientCredentials::new(token_url, id, secret).scope("reports.read");
+Actor::on("reports").client_credentials(creds)         // OAuth2 client credentials grant
 actor("hub_admin")?                                    // named actor from apitest.nova / RunConfig
-cx.bearer(token);                                      // every request in this scope without its own auth
+cx.bearer(token);                                      // requests in this scope without own auth
 ```
 
 - **Logins are lazy and cached.** `.login(..)` makes no request. The first request logs in, and concurrent first requests share that single login. The token is cached per service and identity for the run, refreshed before `expires_in`, and re-acquired once if the service answers `401` (for example after a test revoked it). Failures say who and where: `login as 'mallory' on 'svc' failed: status 401: {"error":"bad credentials"}`.
@@ -350,7 +350,7 @@ Every request carries trace context unless you opt out. W3C Trace Context is the
 
 ## The same suite in four languages
 
-### Rust
+### Rust suite
 
 Attribute macros and actors; the builder API also exists.
 
@@ -387,7 +387,7 @@ async fn create_invoice(user: Actor) -> Result<()> {
 }
 ```
 
-### Rhai
+### Rhai suite
 
 `cx.op` instead of `cx.call`, because `call` is reserved in Rhai.
 
@@ -415,7 +415,7 @@ s.test("create invoice", #{ parallel: true }, |cx| {
 s
 ```
 
-### JavaScript
+### JavaScript suite
 
 Synchronous like k6, with one QuickJS runtime per worker or VU.
 
@@ -441,7 +441,7 @@ s.test("create invoice", { parallel: true }, (cx) => {
 });
 ```
 
-### Python
+### Python suite
 
 pytest-style `yield` fixtures.
 
@@ -675,7 +675,7 @@ load billing-js
 - The JS frontend gives every worker its own QuickJS runtime, and the load runner sizes the pool to the VU count, so JS VUs run in parallel (k6's model). Python releases the GIL during HTTP. Rhai shares one engine (`sync` feature) across blocking threads.
 - `http.error_rate` counts transport errors and 5xx; `iterations.error_rate` counts failed iterations.
 
-## Python
+## Python bindings
 
 ```bash
 cargo build -p apitest --example demo_server
