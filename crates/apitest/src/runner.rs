@@ -382,7 +382,7 @@ async fn fetch_live_spec(
 ) -> Result<(Spec, String)> {
     match live {
         LiveSpec::Document(doc) => Ok((
-            Spec::from_value(doc.clone(), String::new())?,
+            Spec::from_value(doc, String::new())?,
             "in-process document".to_string(),
         )),
         LiveSpec::Url(u) => {

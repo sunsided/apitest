@@ -47,8 +47,8 @@ proptest! {
     #[test]
     fn spec_has_no_drift_against_itself(ops in operations()) {
         let doc = openapi(&ops);
-        let contract = Contract::from_spec("c", Spec::from_value(doc.clone(), String::new()).unwrap());
-        let live = Spec::from_value(doc, String::new()).unwrap();
+        let contract = Contract::from_spec("c", Spec::from_value(&doc, String::new()).unwrap());
+        let live = Spec::from_value(&doc, String::new()).unwrap();
         let usage = contract.usage();
 
         prop_assert!(contract.diff(&live, None, "self").findings.is_empty());
@@ -68,8 +68,8 @@ proptest! {
         let mut live_ops = ops.clone();
         live_ops[i].1.remove(j);
 
-        let contract = Contract::from_spec("c", Spec::from_value(openapi(&ops), String::new()).unwrap());
-        let live = Spec::from_value(openapi(&live_ops), String::new()).unwrap();
+        let contract = Contract::from_spec("c", Spec::from_value(&openapi(&ops), String::new()).unwrap());
+        let live = Spec::from_value(&openapi(&live_ops), String::new()).unwrap();
         let report = contract.diff(&live, None, "live");
 
         prop_assert!(report.is_breaking(), "{:?}", report.findings);

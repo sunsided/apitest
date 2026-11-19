@@ -154,7 +154,7 @@ impl Spec {
                 hex
             });
 
-        Spec::from_value(doc, sha256)
+        Spec::from_value(&doc, sha256)
     }
 
     /// Builds a spec from an already parsed document. `sha256` is stored as
@@ -163,12 +163,8 @@ impl Spec {
     /// # Errors
     ///
     /// Fails when the document has no `paths` object.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "public signature used by the runner, the CLI, fuzz targets and tests; borrowing would break them"
-    )]
-    pub fn from_value(doc: Value, sha256: String) -> Result<Spec> {
-        let resolved = resolve(&doc, &doc, 0);
+    pub fn from_value(doc: &Value, sha256: String) -> Result<Spec> {
+        let resolved = resolve(doc, doc, 0);
         let info = resolved.get("info").cloned().unwrap_or(Value::Null);
         let paths = resolved
             .get("paths")
