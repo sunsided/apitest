@@ -116,12 +116,20 @@ The regular case should read like the scenario it tests. Here is a multi-actor, 
 #[apitest::fixture(scope = "suite")]
 async fn social_worker(hub_admin: Actor) -> Result<Actor> {
     let email = unique_email("social");
-    hub_admin.call("createUser")
+
+    hub_admin
+        .call("createUser")
         .json(json!({ "email": email, "password": PASSWORD, "role": "social_service" }))
         .expect(201)
-        .rollback(|user| hub_admin.call("deleteUser").path("id", &user["id"]).expect(204))
+        .rollback(|user| {
+            hub_admin
+                .call("deleteUser")
+                .path("id", &user["id"])
+                .expect(204)
+        })
         .await?;
-    Ok(Actor::on("hub").login(email, PASSWORD))   // logs in lazily on first use
+
+    Ok(Actor::on("hub").login(email, PASSWORD)) // logs in lazily on first use
 }
 
 #[apitest::test]
@@ -129,33 +137,83 @@ async fn patient_onboarding(social_worker: Actor) -> Result<()> {
     let (app, mail) = (Actor::on("app"), Actor::on("mail"));
     let email = unique_email("patient");
 
-    step("patient registers as a demo user",
-        app.call("registerPatient").json(json!({ "email": email, "password": PASSWORD, "demo": true })).expect(201)).await?;
+    step(
+        "patient registers as a demo user",
+        app.call("registerPatient")
+            .json(json!({ "email": email, "password": PASSWORD, "demo": true }))
+            .expect(201),
+    )
+    .await?;
     undo(mail.delete("/messages").query("to", &email))?;
 
     step("patient confirms the e-mail by opening the link", async {
-        let message: Mail = eventually!(mail.get("/messages").query("to", &email).expect(200).await?.get("/0"))?;
-        visit(&link_containing(&message.html, "/confirm")?).await
-    }).await?;
+        let message: Mail = eventually!(
+            mail.get("/messages")
+                .query("to", &email)
+                .expect(200)
+                .await?
+                .get("/0")
+        )?;
 
-    let patient = step("patient logs in", Actor::on("app").login(&email, PASSWORD).signed_in()).await?;
+        visit(&link_containing(&message.html, "/confirm")?).await
+    })
+    .await?;
+
+    let patient = step(
+        "patient logs in",
+        Actor::on("app").login(&email, PASSWORD).signed_in(),
+    )
+    .await?;
     undo(patient.call("deletePatient").expect(204))?;
 
-    let code: String = step("patient creates an activation code",
-        patient.call("createActivationCode").expect(201)).await?.get("/code")?;
+    let code: String = step(
+        "patient creates an activation code",
+        patient.call("createActivationCode").expect(201),
+    )
+    .await?
+    .get("/code")?;
 
-    let case = step("social worker identifies the patient by code",
-        social_worker.call("identifyPatient").json(json!({ "activation_code": code })).expect(201)
-            .rollback(|case| social_worker.call("deleteCase").path("id", &case["id"]).expect(204))).await?;
+    let case = step(
+        "social worker identifies the patient by code",
+        social_worker
+            .call("identifyPatient")
+            .json(json!({ "activation_code": code }))
+            .expect(201)
+            .rollback(|case| {
+                social_worker
+                    .call("deleteCase")
+                    .path("id", &case["id"])
+                    .expect(204)
+            }),
+    )
+    .await?;
 
-    step("social worker records therapy data",
-        social_worker.call("putTherapy").path("id", &case["id"])
-            .json(json!({ "plan": "CBT", "sessions_per_week": 2 })).expect(200)).await?;
+    step(
+        "social worker records therapy data",
+        social_worker
+            .call("putTherapy")
+            .path("id", &case["id"])
+            .json(json!({ "plan": "CBT", "sessions_per_week": 2 }))
+            .expect(200),
+    )
+    .await?;
 
-    step("case moves to in progress",
-        social_worker.call("updateCase").path("id", &case["id"]).json(json!({ "status": "in_progress" })).expect(200)).await?;
+    step(
+        "case moves to in progress",
+        social_worker
+            .call("updateCase")
+            .path("id", &case["id"])
+            .json(json!({ "status": "in_progress" }))
+            .expect(200),
+    )
+    .await?;
 
-    let current = social_worker.call("getCase").path("id", &case["id"]).expect(200).await?;
+    let current = social_worker
+        .call("getCase")
+        .path("id", &case["id"])
+        .expect(200)
+        .await?;
+
     assert_json!(current, { "status": "in_progress", "therapy": { "plan": "CBT" } });
     Ok(())
 }
@@ -183,15 +241,27 @@ test apitest::[finally] everything was rolled back ... ok
 
 ```rust
 // before
-let inv = cx.call("billing", "createInvoice")?.json(body).send().await?.expect(201)?;
+let inv = cx
+    .call("billing", "createInvoice")?
+    .json(body)
+    .send()
+    .await?
+    .expect(201)?;
 let id = inv.pointer("/id").cloned().context("no id")?;
+
 cx.defer("delete invoice", move |cx| async move {
-    cx.call("billing", "deleteInvoice")?.path_param("id", id).send().await?.expect(204)?;
+    cx.call("billing", "deleteInvoice")?
+        .path_param("id", id)
+        .send()
+        .await?
+        .expect(204)?;
     Ok(())
 });
 
 // after
-user.call("createInvoice").json(body).expect(201)
+user.call("createInvoice")
+    .json(body)
+    .expect(201)
     .rollback(|inv| user.call("deleteInvoice").path("id", &inv["id"]).expect(204))
     .await?;
 ```
@@ -227,7 +297,8 @@ Actor::on("hub").bearer(token)                         // Authorization: Bearer 
 Actor::on("hub").basic("user", "pw")                   // Authorization: Basic …
 Actor::on("hub").api_key("X-Api-Key", key)             // any header
 Actor::on("hub").login("admin@hub.test", "secret")     // via the service's login flow, lazily
-Actor::on("reports").client_credentials(ClientCredentials::new(token_url, id, secret).scope("reports.read"))
+Actor::on("reports")                                   // OAuth2 client credentials
+    .client_credentials(ClientCredentials::new(token_url, id, secret).scope("reports.read"))
 actor("hub_admin")?                                    // named actor from apitest.nova / RunConfig
 cx.bearer(token);                                      // every request in this scope without its own auth
 ```
@@ -407,8 +478,15 @@ Per-test setup/teardown and resource locks look like this in Rhai (other languag
 ```rhai
 s.test("per-test setup and teardown", #{
     parallel: true, resources: ["invoices"], timeout_ms: 5000,
-    setup:    |cx| cx.set("invoice_id", cx.op("billing", "createInvoice", #{ json: #{ amount: 1, currency: "USD" } }).expect(201).body.id),
-    teardown: |cx| cx.op("billing", "deleteInvoice", #{ path: #{ id: cx.get("invoice_id") } }).expect(204),
+    setup: |cx| {
+        let invoice = cx.op("billing", "createInvoice", #{ json: #{ amount: 1, currency: "USD" } })
+            .expect(201);
+        cx.set("invoice_id", invoice.body.id)
+    },
+    teardown: |cx| {
+        cx.op("billing", "deleteInvoice", #{ path: #{ id: cx.get("invoice_id") } })
+            .expect(204)
+    },
 }, |cx| { /* body */ });
 ```
 
@@ -457,11 +535,15 @@ suite billing-rust
 // tests/api.rs, with `harness = false` in Cargo.toml
 fn main() {
     apitest::harness::main(|| async {
-        let server = apitest::TestServer::axum(my_app::router(test_state())).await?;   // real TCP, ephemeral port
+        // real TCP on an ephemeral port
+        let server = apitest::TestServer::axum(my_app::router(test_state())).await?;
         let cfg = apitest::RunConfig::new(server.base_url()).var("API_USER", "demo");
+        let scripts =
+            apitest::script::load_suites("tests/api/billing.js".as_ref(), &Default::default())?;
+
         Ok(apitest::harness::Plan::new(cfg)
-            .suite(my_suites::billing()?)                                              // Rust
-            .suites(apitest::script::load_suites("tests/api/billing.js".as_ref(), &Default::default())?) // and/or scripts
+            .suite(my_suites::billing()?) // Rust
+            .suites(scripts)              // and/or scripts
             .keep(server))
     })
 }
@@ -489,7 +571,10 @@ mod billing {                                   // the module is the suite
 
     #[apitest::suite]                           // optional: contracts, hooks, …
     fn billing() -> Result<Suite> {
-        Ok(Suite::new("billing").contract(Contract::pinned("billing", "specs/billing-1.0.yaml")?.live_spec("/openapi.json")))
+        let contract = Contract::pinned("billing", "specs/billing-1.0.yaml")?
+            .live_spec("/openapi.json");
+
+        Ok(Suite::new("billing").contract(contract))
     }
 
     #[apitest::fixture(scope = "suite", teardown = logout)]
@@ -509,7 +594,9 @@ mod billing {                                   // the module is the suite
 fn main() {
     apitest::harness::main(|| async {
         let server = apitest::TestServer::axum(app()).await?;
-        Ok(apitest::harness::Plan::new(apitest::RunConfig::new(server.base_url())).registered()?.keep(server))
+        let cfg = apitest::RunConfig::new(server.base_url());
+
+        Ok(apitest::harness::Plan::new(cfg).registered()?.keep(server))
     })
 }
 ```
