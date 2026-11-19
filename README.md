@@ -40,6 +40,7 @@ API testing and load testing in Rust, with:
   - [Native-feeling Rust tests: attribute macros](#native-feeling-rust-tests-attribute-macros)
   - [nextest](#nextest)
 - [CLI](#cli)
+  - [Terminal diagnostics](#terminal-diagnostics)
 - [Load testing](#load-testing)
 - [Python bindings](#python-bindings)
 - [Tests](#tests)
@@ -55,7 +56,7 @@ Four crates: the library, its proc macros, the CLI and the Python bindings. Libr
 
 ```
 crates/apitest      the library
-  features: load, axum (default) · rhai, js, harness, macros (opt-in) · full (all of them)
+  features: load, axum (default) · rhai, js, harness, macros, diagnostics (opt-in) · full (all of them)
             --no-default-features = core only (runner, contracts, HTTP, reports, NOVA config)
   src/context.rs    scope chain (run → suite → vu → test), values, default headers, defer/unwind, guarded execution
   src/suite.rs      Suite / Fixture / TestCase / TestOpts (concurrency, resources, timeout, setup, teardown)
@@ -68,9 +69,10 @@ crates/apitest      the library
   src/harness.rs    cargo test / nextest integration
   src/registry.rs   collects #[apitest::test|fixture|suite] registrations (linkme)
   src/report.rs     console, JUnit XML
+  src/diagnostic.rs miette rendering for the terminal (feature diagnostics)
   src/config.rs     apitest.nova
 crates/apitest-macros  #[apitest::test], #[apitest::fixture], #[apitest::suite]
-crates/apitest-cli  the `apitest` binary (clap); depends on apitest with rhai, js, load
+crates/apitest-cli  the `apitest` binary (clap); depends on apitest with rhai, js, load, diagnostics
 crates/apitest-py   pyo3 extension (`apitest._native`) + the `apitest` Python package (maturin)
 npm/                @apitest/cli: launcher + per-platform binary packages + TypeScript types for JS suites
 demo/               billing service specs (v1.0 pinned, v1.1 compatible, v2.0 breaking), suites in Rhai/JS, apitest.nova
@@ -660,6 +662,20 @@ reports:
 
 Exit codes: 0 passed, 1 tests or thresholds failed, 2 usage or config error.
 
+### Terminal diagnostics
+
+With the `diagnostics` feature (part of `full`, and always on in the CLI), `SuiteReport::render_terminal(color)` renders failures as [miette](https://docs.rs/miette) diagnostics with their whole cause chain:
+
+```text
+  ✗ sign in [3 ms]
+      ✗ as mallory [3 ms]
+        × step 'as mallory' failed
+        ├─▶ login as 'mallory' on 'svc' failed
+        ╰─▶ status 401: {"error":"bad credentials"}
+```
+
+The CLI uses it for suite output and for its own errors. Colour is only used on a terminal, and `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE` and `TERM=dumb` are respected (`apitest::diagnostic::use_color`). `render`, JUnit, JSON, `assert_passed` and the libtest harness messages stay plain text, because CI and IDE tooling parses them. The cause chain is kept on `Outcome::Failed` and `SuiteReport::setup_chain`, but it is not serialized.
+
 ## Load testing
 
 ```text
@@ -694,6 +710,7 @@ cd crates/apitest-py && maturin develop && pytest -v
 | `cargo test -p apitest --features full --test scenarios` | drift (compatible/breaking/in-process doc), runtime validation, cleanup after failure/panic/timeout, serial vs parallel vs resources, lockfile, JUnit, Rhai/JS suites, Rust and JS load (ramping) |
 | `cargo test -p apitest --features full --test billing_harness` | the libtest harness with Rust, Rhai and JS suites against an in-process axum app |
 | `cargo test -p apitest --features full --test headers` | trace formats and correlation, opt-out at every level, parent traces, User-Agent precedence, all auth kinds, single-flight cached logins with 401 re-login, client-credentials expiry, named actors from Rust, JS and Rhai |
+| `cargo test -p apitest --features full --test it diagnostics` | miette cause chains in `render_terminal`, plain text in `render`, JUnit, JSON and `assert_passed` |
 | `cargo test -p apitest --features full --test care_flow` | the multi-actor, multi-service onboarding flow (Hub, App, mail mock) with step reports, rollback and a `finally` leftover check |
 | `cargo test -p apitest --features full --test macro_harness` | the same suite via `#[apitest::test]` / `#[apitest::fixture]` / `#[apitest::suite]` (`DEMO_VARIANT=2.0` shows drift) |
 | `cargo nextest run -p apitest --features full` | all harness targets process-per-test; `nextest_locks` checks the cross-process serial/resource rules |
@@ -708,7 +725,7 @@ Each scenario checks `GET /_stats` afterwards to prove that no tokens or invoice
 
 ## Open questions / next steps
 
-- **miette diagnostics (decided: terminal only).** The CLI and the console reporter render failures with miette. JUnit, JSON and the libtest harness messages stay plain text, because CI and IDE tooling parses them. In order of effort:
+- **Source spans in diagnostics.** Failures render with miette on the terminal (see [Terminal diagnostics](#terminal-diagnostics)), but without source spans yet. In order of effort:
   - Rhai errors already carry line and column, so failures can point at the `cx.op(..)` call in the `.rhai` file.
   - NOVA config errors get spans through `novafile-text`'s `miette` feature.
   - JS needs scripts evaluated with their file names.

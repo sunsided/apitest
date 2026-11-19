@@ -55,6 +55,7 @@ contract pinning and load testing in depth.
 | `js`      | no      | JavaScript (QuickJS) scripting frontend |
 | `harness` | no      | `cargo test` / nextest integration (pulls in clap via libtest-mimic) |
 | `macros`  | no      | `#[apitest::test]`, `#[apitest::fixture]`, `#[apitest::suite]` |
+| `diagnostics` | no  | `SuiteReport::render_terminal`: failures as miette diagnostics on the terminal (reports stay plain text) |
 | `full`    | no      | All of the above |
 
 `--no-default-features` leaves the core: runner, contracts, HTTP, reports and NOVA config.
