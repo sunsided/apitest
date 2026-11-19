@@ -2,7 +2,7 @@
 
 use apitest::Contract;
 use apitest::contract::{Severity, Spec};
-use apitest::load::{Threshold, parse_quantity};
+use apitest::load::{Threshold, parse_duration, parse_quantity};
 use apitest::trace::Traceparent;
 use proptest::prelude::*;
 use serde_json::{Map, Value, json};
@@ -112,6 +112,14 @@ proptest! {
         prop_assert_eq!(parse_quantity(&format!("{n}m")).unwrap(), v * 60_000.0);
         prop_assert_eq!(parse_quantity(&format!("{n}%")).unwrap(), v / 100.0);
         prop_assert_eq!(parse_quantity(&n.to_string()).unwrap(), v);
+    }
+
+    /// Durations never panic: negative, non-finite and huge values are errors.
+    #[test]
+    fn durations_never_panic(s in "-?[0-9.e+-]{0,8}(ms|s|m|inf|NaN)?") {
+        if let Ok(d) = parse_duration(&s) {
+            prop_assert!(d.as_secs_f64().is_finite());
+        }
     }
 
     /// Every comparison operator is accepted, for both metric groups.

@@ -242,6 +242,16 @@ pub(crate) fn make_shared(suite: &Suite, cfg: &RunConfig) -> Result<Arc<Shared>>
     let http = reqwest::Client::builder()
         .build()
         .context("building HTTP client")?;
+
+    make_shared_with(suite, cfg, http)
+}
+
+/// [`make_shared`] with a ready-made HTTP client.
+///
+/// # Errors
+///
+/// Fails if the trace parent is malformed.
+fn make_shared_with(suite: &Suite, cfg: &RunConfig, http: reqwest::Client) -> Result<Arc<Shared>> {
     let mut config = cfg.clone();
     if let Some(t) = &suite.tracing {
         config.tracing = t.clone();
@@ -261,6 +271,56 @@ pub(crate) fn make_shared(suite: &Suite, cfg: &RunConfig) -> Result<Arc<Shared>>
         contracts,
         validate_counter: AtomicU64::default(),
     }))
+}
+
+impl Ctx {
+    /// A run-scope context outside any suite: no contracts, no fixtures, nothing
+    /// deferred.
+    ///
+    /// For one-off requests such as the CLI's `apitest call`. Requests sent
+    /// through it still get the run's User-Agent, tracing, services, vars and
+    /// named actors from `cfg`.
+    ///
+    /// Redirects are followed only within the origin (scheme, host and port) of
+    /// the request, at most 10 times. A redirect to another origin is returned as
+    /// the response instead: following it would send an actor's API-key or
+    /// configured headers, which the HTTP client only strips for `Authorization`
+    /// and cookies, to that host.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the HTTP client cannot be built or the configured trace parent is
+    /// malformed.
+    pub fn standalone(cfg: &RunConfig) -> Result<Ctx> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(same_origin_redirect))
+            .build()
+            .context("building HTTP client")?;
+
+        Ok(Ctx::root(make_shared_with(
+            &Suite::new("standalone"),
+            cfg,
+            http,
+        )?))
+    }
+}
+
+/// Redirect policy of [`Ctx::standalone`]: follow up to 10 redirects that stay
+/// on the origin of the first request, stop at any other.
+fn same_origin_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+    let same_origin = attempt
+        .previous()
+        .first()
+        .is_some_and(|first| first.origin() == attempt.url().origin());
+    if !same_origin {
+        return attempt.stop();
+    }
+
+    if attempt.previous().len() > 10 {
+        return attempt.error("too many redirects");
+    }
+
+    attempt.follow()
 }
 
 /// Fetches live specs and diffs them against the pinned ones.

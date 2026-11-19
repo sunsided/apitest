@@ -130,6 +130,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "apitest",
+ "axum",
  "clap",
  "serde_json",
  "tokio",

@@ -23,5 +23,8 @@ serde_json.workspace = true
 tokio.workspace = true
 clap = { version = "4.6", features = ["derive"] }
 
+[dev-dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
+
 [lints]
 workspace = true

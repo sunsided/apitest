@@ -26,9 +26,11 @@ apitest load suites/billing.js -t "create and fetch invoice" \
   --stages "10s:20,30s:20,10s:0" --threshold "http.p95 < 50ms"
 apitest contract check suites/billing.rhai -u http://127.0.0.1:8080
 apitest contract diff specs/billing-1.0.yaml specs/billing-2.0.yaml
+apitest call hub GET /users/me --as hub_admin              # one request, no suite or spec
 ```
 
-Exit codes: 0 passed, 1 tests or thresholds failed, 2 usage or config error.
+Exit codes: 0 passed, 1 tests or thresholds failed (for `apitest call`: a status other
+than 2xx or `--expect`), 2 usage or config error.
 
 ## License
 

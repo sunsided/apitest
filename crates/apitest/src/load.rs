@@ -373,13 +373,11 @@ pub fn parse_quantity(s: &str) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Fails if `s` is not a valid quantity (see [`parse_quantity`]).
-///
-/// # Panics
-///
-/// Panics if the quantity is negative, not finite, or too large for a [`Duration`].
+/// Fails if `s` is not a valid quantity (see [`parse_quantity`]), or if it is
+/// negative, not finite, or too large for a [`Duration`].
 pub fn parse_duration(s: &str) -> Result<Duration> {
-    Ok(Duration::from_secs_f64(parse_quantity(s)? / 1000.0))
+    Duration::try_from_secs_f64(parse_quantity(s)? / 1000.0)
+        .map_err(|_| anyhow!("invalid duration '{s}' (expected e.g. 500ms, 30s, 2m)"))
 }
 
 /// One load scenario: a functional test driven by an executor, plus pass criteria.
