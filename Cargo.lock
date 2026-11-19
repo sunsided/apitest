@@ -106,7 +106,9 @@ dependencies = [
  "anyhow",
  "apitest-macros",
  "axum",
+ "bytes",
  "dotenvy",
+ "encoding_rs",
  "hdrhistogram",
  "jsonschema",
  "libtest-mimic",
@@ -134,6 +136,7 @@ dependencies = [
  "apitest",
  "axum",
  "clap",
+ "reqwest",
  "serde_json",
  "tokio",
 ]

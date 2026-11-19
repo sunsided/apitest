@@ -785,15 +785,15 @@ apitest call mail GET /messages --query to=a@b.test -i                      # -i
 apitest call hub DELETE /users/7 --as hub_admin --expect 204 -v             # -v: request/response summary on stderr
 ```
 
-- **Bodies** are UTF-8 text: `--json`, `--data` (inline, `@file`, `@-` for stdin; `@@` starts a literal `@`) or `--form k=v`.
+- **Bodies** are UTF-8 text of at most 16 MiB: `--json`, `--data` (inline, `@file`, `@-` for stdin; `@@` starts a literal `@`) or `--form k=v`.
 - **Variables and redaction** work as in `run` (see [Variables, `.env` files and redaction](#variables-env-files-and-redaction)): `.env` / `.env.local` next to `apitest.nova` (or `--env-file`, `--no-env-file`), `--var`, and `redact:` / `--redact`. Only the actor in `--as` must have all its variables; another actor's missing secret doesn't block a one-off call.
-- **Output.** The response body goes to stdout, so it pipes into `jq`. Known secrets and redaction patterns are masked as `***` there too (in the body and, with `-i`, the headers), so a token endpoint's answer doesn't end up in a terminal or CI log. `-i` puts `HTTP <status>` and the response headers before it (a repeated header shows its last value). `-v` writes the request as sent and the response status to stderr, with cookies, `Authorization`, the header a login flow or API key uses, and the actor's configured `headers:` redacted. Errors go to stderr as [terminal diagnostics](#terminal-diagnostics). `--timeout` (default 30s, including a login) stops a hanging call.
-- **Exit codes.** 0 for a 2xx status (or the `--expect` status), 1 for any other status, 2 for usage, config, auth or connection errors.
-- **Nothing is guessed, especially not auth.** The service must be listed under `services:` (`base_url` is not a fallback), and the path, like a login flow's `path`, must start with `/`, so credentials can't be sent to another host. Without `--as`, the request carries no credentials. An actor that logs in needs a login flow with a `path` under `auth:`, because there is no spec to find a `login` operation in. If it's missing, the call fails before sending anything:
+- **Output.** The response body goes to stdout as received, byte for byte, so it pipes into `jq` and binary downloads work. Known secrets and redaction patterns are masked as `***` there too (in the body and, with `-i`, the headers), so a token endpoint's answer doesn't end up in a terminal or CI log; that is the one case a body is changed. `-i` puts `HTTP <status>` and the response headers before it (a repeated header shows its last value). `-v` writes the request as sent (including the query) and the response to stderr. Besides known secrets and patterns, it redacts any header or query parameter whose name contains `auth`, `cookie`, `token`, `key`, `secret`, `session`, `password` or `credential` (a `-H` value of such a header is masked everywhere else too, and so is a `--query` value whose name is a credential's: `token`, `key`, `apikey`, `password`, `secret`, `sig`, `signature` or one ending in `_token`, `_key`, `_secret` or `_password`), plus the header a login flow or API key uses and the actor's configured `headers:`, and drops `user:password@` from the URL. Errors go to stderr as [terminal diagnostics](#terminal-diagnostics). `--timeout` (default 30s, including a login) stops a hanging call; it starts once the body is read, so it does not cover waiting for `@-` on stdin.
+- **Exit codes.** 0 for a 2xx status (or the `--expect` status), 1 for any other status, 2 for usage, config, login, connection or redirect-limit errors and for `--timeout`.
+- **Nothing is guessed, especially not auth.** The service must be listed under `services:` (`base_url` is not a fallback), and the path, like a login flow's `path`, must start with `/`, so credentials can't be sent to another host. Without `--as`, no credentials are taken from the config: the request carries only what you pass with `-H`. An actor that logs in needs a service to log in on (its `service:` or `auth.service`) and a login flow with a `path` under `auth:`, because there is no spec to find a `login` operation in. If it's missing, the call fails before sending anything:
 
   ```text
     × actor 'hub_admin' logs in as '${HUB_ADMIN_EMAIL}' on 'hub', but there is no login flow for 'hub'
-    │ help: `apitest call` has no OpenAPI spec and doesn't guess a login endpoint; configure it in apitest.nova, e.g.
+    │ help: `apitest call` has no OpenAPI spec and doesn't guess a login endpoint; configure it in /srv/billing/apitest.nova, e.g.
     │   auth:
     │     hub:
     │       path: /login
@@ -803,8 +803,8 @@ apitest call hub DELETE /users/7 --as hub_admin --expect 204 -v             # -v
     │       token: /token
   ```
 
-- **Actors stay intact.** An actor must belong to the service it's sent to, and a `-H` for a header the actor sets (its credentials, `headers:` or `user_agent:`) is refused instead of silently replacing the actor's value.
-- **Redirects stay on the service.** Redirects are followed only within the service's origin (scheme, host and port), at most 10 times. A redirect to another origin is not followed: the 3xx is the result (exit 1), and its target is named on stderr, so an API key, an actor's `headers:` or a `-H` value never reach another host.
+- **Actors stay intact.** An actor must belong to the service it's sent to, and a `-H` for a header the actor sets (its credentials, `headers:` or `user_agent:`) is refused: the two would conflict, and one of them would be dropped without a word (an `Authorization` replaces the actor's credentials, while an API key or login-flow header overwrites yours).
+- **Redirects stay on the service.** Redirects are followed only within the service's origin (scheme, host and port), at most 10 times (more is an error, exit 2). A redirect to another origin is not followed, so an API key, an actor's `headers:` or a `-H` value never reach another host: the 3xx is the result, which exits 1 unless `--expect` names that status, and stderr then names the `Location` it pointed to. An `http://` to `https://` upgrade of the same host counts as another origin too (the HTTP client would drop `Authorization` but keep an API key), so configure the service's `https://` URL.
 
 ## Load testing
 

@@ -8,7 +8,8 @@
 //!
 //! Nothing is guessed. The service must be listed under `services:`, the actor
 //! under `actors:`, and an actor that logs in needs an explicit login flow with
-//! a `path` under `auth:`. Without `--as` the request carries no credentials.
+//! a `path` under `auth:`. Without `--as` no credentials come from the config,
+//! only what `-H` passes.
 //!
 //! ```mermaid
 //! flowchart LR
@@ -29,6 +30,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 
 use apitest::config::ProjectConfig;
@@ -89,17 +91,31 @@ fn parse_timeout(s: &str) -> Result<Duration, String> {
     }
 }
 
-/// Parses `-H 'Name: value'`; the value is trimmed and may contain `:`.
+/// Parses `-H 'Name: value'`; the value is trimmed and may contain `:`. The
+/// name must be an HTTP token and the value visible ASCII, so a bad header is a
+/// usage error before any body is read.
 fn parse_header(s: &str) -> Result<(String, String), String> {
     let (k, v) = s
         .split_once(':')
         .ok_or_else(|| format!("expected 'Name: value', got '{s}'"))?;
-    let k = k.trim();
+    let (k, v) = (k.trim(), v.trim());
     if k.is_empty() {
         return Err(format!("empty header name in '{s}'"));
     }
 
-    Ok((k.to_string(), v.trim().to_string()))
+    if HeaderName::from_bytes(k.as_bytes()).is_err() {
+        return Err(format!(
+            "invalid header name '{k}': use letters, digits and !#$%&'*+-.^_`|~, no spaces"
+        ));
+    }
+
+    if HeaderValue::from_str(v).is_err() {
+        return Err(format!(
+            "invalid value for header '{k}': only visible ASCII, spaces and tabs, no line breaks"
+        ));
+    }
+
+    Ok((k.to_string(), v.to_string()))
 }
 
 /// Runs `apitest call`. `Ok(false)` means the status was not the expected one.
@@ -118,16 +134,17 @@ pub async fn call(a: Args, redactor: &Redactor) -> Result<bool> {
     target::check_request(&a.method, &a.path)?;
     target::check_service(&cfg, &a.service, &source)?;
     if let Some(name) = &a.actor {
-        actor::check(&cfg, name, &a.service, &a.header)?;
+        actor::check(&cfg, name, &a.service, &a.header, &source)?;
     }
 
     // Only the actor this call uses must resolve: an unrelated actor's missing
     // secret doesn't block a one-off request.
     cfg.actors.retain(|name, _| a.actor.as_ref() == Some(name));
+    output::register_secrets(redactor, &a.header, &a.query);
     let opts = request_opts(&a)?;
     let resp = send(&cfg, &a, opts).await?;
     if a.verbose {
-        let summary = output::summary(&resp, &cfg, a.actor.as_deref());
+        let summary = output::summary(&resp, &cfg, a.actor.as_deref(), &a.query);
         eprint!("{}", redactor.redact(&summary));
     }
 
@@ -211,25 +228,27 @@ async fn send(cfg: &RunConfig, a: &Args, opts: RequestOpts) -> Result<Response> 
     })?
 }
 
-/// Whether the status is the `--expect`ed one (default: any 2xx). Says on
-/// stderr what was expected when it is not, and where an unfollowed redirect
+/// Whether the status is the `--expect`ed one (default: any 2xx). When it is
+/// not, says on stderr what was expected and where an unfollowed redirect
 /// pointed (masked with `redactor`).
 fn status_ok(resp: &Response, expect: Option<u16>, redactor: &Redactor) -> bool {
     let ok = expect.map_or((200..300).contains(&resp.status), |s| resp.status == s);
-    if !ok {
-        let wanted = expect.map_or_else(|| "2xx".to_string(), |s| s.to_string());
-        eprintln!("status {} (expected {wanted})", resp.status);
+    if ok {
+        return true;
     }
 
-    // Only redirects to another origin come back unfollowed (see `Ctx::standalone`).
-    if let (301..=303 | 307 | 308, Some(location)) = (resp.status, resp.header("location")) {
+    let wanted = expect.map_or_else(|| "2xx".to_string(), |s| s.to_string());
+    eprintln!("status {} (expected {wanted})", resp.status);
+    if let (301..=303 | 307 | 308, Some(location)) = (resp.status, resp.header("location"))
+        && !location.is_empty()
+    {
         eprintln!(
-            "redirect to {} not followed: it leaves the service's origin",
+            "redirect to {} not followed (only redirects within the service's origin are)",
             redactor.redact(location)
         );
     }
 
-    ok
+    false
 }
 
 #[cfg(test)]
@@ -238,7 +257,7 @@ mod tests {
 
     #[test]
     fn bad_timeouts_are_usage_errors_not_panics() {
-        for t in ["-1s", "NaN", "infs", "1e300s", "0s"] {
+        for t in ["-1s", "NaN", "infs", "1e300s", "0s", "50%", "100%", "5h"] {
             assert!(parse_timeout(t).is_err(), "{t}");
         }
 
@@ -257,5 +276,11 @@ mod tests {
         );
         assert!(parse_header("nope").is_err());
         assert!(parse_header(": v").is_err());
+        assert!(parse_header("X Foo: v").unwrap_err().contains("'X Foo'"));
+        assert!(
+            parse_header("X-A: a\r\nY: b")
+                .unwrap_err()
+                .contains("header 'X-A'")
+        );
     }
 }
