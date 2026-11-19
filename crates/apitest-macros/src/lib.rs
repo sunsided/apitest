@@ -22,19 +22,31 @@ use quote::{format_ident, quote};
 use syn::parse::Parser;
 use syn::{Expr, ExprArray, ExprLit, FnArg, ItemFn, Lit, Pat, ReturnType, Type, parse_macro_input};
 
+/// Arguments of any of the attributes; [`parse_args`] rejects the keys an
+/// attribute does not support.
 #[derive(Default)]
 struct Args {
+    /// `name = "..."`: display name of a test, or storage key of a fixture.
     name: Option<String>,
+    /// `suite = "..."`: suite key, overriding the module path.
     suite: Option<String>,
+    /// `scope = "suite" | "vu" | "test"` of a fixture.
     scope: Option<String>,
+    /// `teardown = path`: async fn run when a fixture's scope ends.
     teardown: Option<syn::Path>,
+    /// `parallel`: the test may run alongside others.
     parallel: bool,
+    /// `serial`: the test runs alone (the default); exclusive with `parallel`.
     serial: bool,
+    /// `resources = [..]` / `resource = ".."`: locks the test holds while running.
     resources: Vec<String>,
+    /// `tags = [..]`: labels for filtering.
     tags: Vec<String>,
+    /// `timeout_ms = N`: per-test timeout in milliseconds.
     timeout_ms: Option<u64>,
 }
 
+/// Reads a string literal or an array of string literals.
 fn strings(e: &Expr) -> syn::Result<Vec<String>> {
     match e {
         Expr::Array(ExprArray { elems, .. }) => elems.iter().map(string).collect(),
@@ -42,6 +54,7 @@ fn strings(e: &Expr) -> syn::Result<Vec<String>> {
     }
 }
 
+/// Reads a string literal, rejecting any other expression.
 fn string(e: &Expr) -> syn::Result<String> {
     match e {
         Expr::Lit(ExprLit {
@@ -51,6 +64,9 @@ fn string(e: &Expr) -> syn::Result<String> {
     }
 }
 
+/// Parses `key = value` / flag arguments, accepting only the keys in `allowed`.
+///
+/// Keys may repeat; list arguments accumulate and the last scalar wins.
 fn parse_args(attr: TokenStream, allowed: &[&str]) -> syn::Result<Args> {
     let mut a = Args::default();
     let parser = syn::meta::parser(|meta| {
@@ -80,19 +96,23 @@ fn parse_args(attr: TokenStream, allowed: &[&str]) -> syn::Result<Args> {
             }
             _ => unreachable!(),
         }
+
         Ok(())
     });
     parser.parse(attr)?;
+
     if a.parallel && a.serial {
         return Err(syn::Error::new(
             Span::call_site(),
             "a test is either `parallel` or `serial`",
         ));
     }
+
     Ok(a)
 }
 
-fn opt_str(s: &Option<String>) -> TokenStream2 {
+/// Tokens for an `Option<&'static str>` literal.
+fn opt_str(s: Option<&str>) -> TokenStream2 {
     if let Some(v) = s {
         quote!(::core::option::Option::Some(#v))
     } else {
@@ -100,6 +120,7 @@ fn opt_str(s: &Option<String>) -> TokenStream2 {
     }
 }
 
+/// How a parameter of an annotated function is supplied.
 enum Param {
     /// `cx: Ctx` (any name): receives the context.
     Ctx,
@@ -107,6 +128,7 @@ enum Param {
     Fixture(syn::Ident, Box<Type>),
 }
 
+/// Whether `ty` names `Ctx` (by any path, by value or by reference).
 fn is_ctx_type(ty: &Type) -> bool {
     match ty {
         Type::Path(p) => p.path.segments.last().is_some_and(|s| s.ident == "Ctx"),
@@ -123,6 +145,7 @@ fn params(f: &ItemFn) -> syn::Result<Vec<Param>> {
             "apitest items must be `async fn`",
         ));
     }
+
     f.sig
         .inputs
         .iter()
@@ -153,8 +176,8 @@ fn params(f: &ItemFn) -> syn::Result<Vec<Param>> {
 fn wrapper(
     f: &ItemFn,
     wrapper_name: &syn::Ident,
-    output: TokenStream2,
-    map_result: TokenStream2,
+    output: &TokenStream2,
+    map_result: &TokenStream2,
 ) -> syn::Result<TokenStream2> {
     let params = params(f)?;
     let ident = &f.sig.ident;
@@ -171,6 +194,7 @@ fn wrapper(
             }
         }
     }
+
     Ok(quote! {
         #[doc(hidden)]
         fn #wrapper_name(cx: ::apitest::Ctx) -> ::apitest::suite::BoxFut<#output> {
@@ -183,11 +207,15 @@ fn wrapper(
     })
 }
 
+/// Whether `f` declares no return type.
 fn returns_unit(f: &ItemFn) -> bool {
     matches!(f.sig.output, ReturnType::Default)
 }
 
 /// Registers an async test.
+///
+/// Not compiled here: the expansion refers to `apitest`, which this proc-macro crate
+/// cannot depend on. The `apitest` integration tests exercise it.
 ///
 /// ```ignore
 /// #[apitest::test(parallel, resources = ["invoices"], timeout_ms = 5000)]
@@ -208,6 +236,8 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Expands `#[apitest::test]`: the user fn under a hidden name, its wrapper, a
+/// tooling marker under the original name, the options fn and the registration.
 fn expand_test(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
     let a = parse_args(
         attr,
@@ -227,40 +257,19 @@ fn expand_test(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
     let body_fn = format_ident!("__apitest_test_{}", ident);
     let opts_fn = format_ident!("__apitest_opts_{}", ident);
     let stat = format_ident!("__APITEST_TEST_{}", ident.to_string().to_uppercase());
-    let map = if returns_unit(f) {
-        quote!({
-            let () = out;
-            ::core::result::Result::Ok(())
-        })
-    } else {
-        quote!(::core::result::Result::map_err(
-            out,
-            ::core::convert::Into::<::apitest::__private::anyhow::Error>::into
-        ))
-    };
+
     // The user's function is kept under a hidden name; its original name becomes a
     // `#[test]` marker that only exists for tooling (see below).
     let mut imp = f.clone();
     imp.sig.ident = format_ident!("__apitest_impl_{}", ident);
-    let wrap = wrapper(&imp, &body_fn, quote!(()), map)?;
+    let wrap = wrapper(&imp, &body_fn, &quote!(()), &test_result_map(f))?;
     let marker_msg = format!(
         "`{fn_name}` is an #[apitest::test]; it runs through apitest::harness::main in a `harness = false` test target, not through libtest"
     );
-    let concurrency = if a.parallel {
-        quote!(::apitest::Concurrency::Parallel)
-    } else {
-        quote!(::apitest::Concurrency::Serial)
-    };
-    let resources = &a.resources;
-    let tags = &a.tags;
-    let timeout = if let Some(ms) = a.timeout_ms {
-        quote!(::core::option::Option::Some(::std::time::Duration::from_millis(#ms)))
-    } else {
-        quote!(::core::option::Option::None)
-    };
-    let (name, suite) = (opt_str(&a.name), opt_str(&a.suite));
+    let opts = test_opts_fn(&a, &opts_fn);
+    let (name, suite) = (opt_str(a.name.as_deref()), opt_str(a.suite.as_deref()));
+
     Ok(quote! {
-        #[allow(non_snake_case)]
         #imp
         #wrap
         // Marker for rust-analyzer & co.: they recognise tests by a `#[test]`-like
@@ -271,21 +280,13 @@ fn expand_test(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
         // libtest target it fails loudly instead of passing silently.
         #[cfg(test)]
         #[::core::prelude::v1::test]
+        #[doc(hidden)]
         fn #ident() {
             ::core::panic!(#marker_msg);
         }
-        #[doc(hidden)]
-        fn #opts_fn() -> ::apitest::TestOpts {
-            let mut o = ::apitest::TestOpts::default();
-            o.concurrency = #concurrency;
-            o.resources = ::std::vec![#(::std::string::String::from(#resources)),*];
-            o.tags = ::std::vec![#(::std::string::String::from(#tags)),*];
-            o.timeout = #timeout;
-            o
-        }
+        #opts
         #[::apitest::__private::linkme::distributed_slice(::apitest::__private::TESTS)]
         #[linkme(crate = ::apitest::__private::linkme)]
-        #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         static #stat: ::apitest::__private::TestDef = ::apitest::__private::TestDef {
             module: ::core::module_path!(),
@@ -300,8 +301,55 @@ fn expand_test(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
     })
 }
 
+/// Tokens that turn the test fn's output `out` into `anyhow::Result<()>`:
+/// `()` passes, any `Result` has its error converted.
+fn test_result_map(f: &ItemFn) -> TokenStream2 {
+    if returns_unit(f) {
+        quote!({
+            let () = out;
+            ::core::result::Result::Ok(())
+        })
+    } else {
+        quote!(::core::result::Result::map_err(
+            out,
+            ::core::convert::Into::<::apitest::__private::anyhow::Error>::into
+        ))
+    }
+}
+
+/// Generates `fn #opts_fn() -> TestOpts` from the test's attribute arguments.
+fn test_opts_fn(a: &Args, opts_fn: &syn::Ident) -> TokenStream2 {
+    let concurrency = if a.parallel {
+        quote!(::apitest::Concurrency::Parallel)
+    } else {
+        quote!(::apitest::Concurrency::Serial)
+    };
+    let resources = &a.resources;
+    let tags = &a.tags;
+    let timeout = if let Some(ms) = a.timeout_ms {
+        quote!(::core::option::Option::Some(::std::time::Duration::from_millis(#ms)))
+    } else {
+        quote!(::core::option::Option::None)
+    };
+
+    quote! {
+        #[doc(hidden)]
+        fn #opts_fn() -> ::apitest::TestOpts {
+            let mut o = ::apitest::TestOpts::default();
+            o.concurrency = #concurrency;
+            o.resources = ::std::vec![#(::std::string::String::from(#resources)),*];
+            o.tags = ::std::vec![#(::std::string::String::from(#tags)),*];
+            o.timeout = #timeout;
+            o
+        }
+    }
+}
+
 /// Registers an async fixture. Its return value (any `Serialize`) is stored
 /// under the function name and injected into tests by parameter name.
+///
+/// Not compiled here: the expansion refers to `apitest`, which this proc-macro crate
+/// cannot depend on. The `apitest` integration tests exercise it.
 ///
 /// ```ignore
 /// #[apitest::fixture(scope = "suite", teardown = logout)]
@@ -324,6 +372,8 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Expands `#[apitest::fixture]`: the unchanged user fn, its setup wrapper, an
+/// optional teardown wrapper and the registration.
 fn expand_fixture(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
     let a = parse_args(attr, &["scope", "teardown", "name", "suite"])?;
     let ident = &f.sig.ident;
@@ -335,6 +385,7 @@ fn expand_fixture(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
             "scope must be \"suite\", \"vu\" or \"test\"",
         ));
     }
+
     let setup_fn = format_ident!("__apitest_fixture_{}", ident);
     let stat = format_ident!("__APITEST_FIXTURE_{}", ident.to_string().to_uppercase());
     let map = quote! {
@@ -344,10 +395,10 @@ fn expand_fixture(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
     let wrap = wrapper(
         f,
         &setup_fn,
-        quote!(::apitest::__private::serde_json::Value),
-        map,
+        &quote!(::apitest::__private::serde_json::Value),
+        &map,
     )?;
-    let (teardown_def, teardown_ref) = match &a.teardown {
+    let (teardown_fn, teardown_field) = match &a.teardown {
         Some(path) => {
             let td = format_ident!("__apitest_teardown_{}", ident);
             (
@@ -364,14 +415,14 @@ fn expand_fixture(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
         }
         None => (quote!(), quote!(::core::option::Option::None)),
     };
-    let suite = opt_str(&a.suite);
+    let suite = opt_str(a.suite.as_deref());
+
     Ok(quote! {
         #f
         #wrap
-        #teardown_def
+        #teardown_fn
         #[::apitest::__private::linkme::distributed_slice(::apitest::__private::FIXTURES)]
         #[linkme(crate = ::apitest::__private::linkme)]
-        #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         static #stat: ::apitest::__private::FixtureDef = ::apitest::__private::FixtureDef {
             module: ::core::module_path!(),
@@ -381,12 +432,15 @@ fn expand_fixture(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
             file: ::core::file!(),
             line: ::core::line!(),
             setup: #setup_fn,
-            teardown: #teardown_ref,
+            teardown: #teardown_field,
         };
     })
 }
 
-/// Declares the base [`Suite`] for a module: contracts, hooks, extra builder-style tests.
+/// Declares the base `apitest::Suite` for a module: contracts, hooks, extra builder-style tests.
+///
+/// Not compiled here: the expansion refers to `apitest`, which this proc-macro crate
+/// cannot depend on. The `apitest` integration tests exercise it.
 ///
 /// ```ignore
 /// #[apitest::suite]
@@ -414,14 +468,14 @@ pub fn suite(attr: TokenStream, item: TokenStream) -> TokenStream {
         .to_compile_error();
         return quote!(#f #err).into();
     }
+
     let ident = &f.sig.ident;
     let stat = format_ident!("__APITEST_SUITE_{}", ident.to_string().to_uppercase());
-    let suite = opt_str(&a.suite);
+    let suite = opt_str(a.suite.as_deref());
     quote! {
         #f
         #[::apitest::__private::linkme::distributed_slice(::apitest::__private::SUITES)]
         #[linkme(crate = ::apitest::__private::linkme)]
-        #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         static #stat: ::apitest::__private::SuiteDef = ::apitest::__private::SuiteDef {
             module: ::core::module_path!(),
