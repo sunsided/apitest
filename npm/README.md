@@ -1,4 +1,4 @@
-# npm distribution (draft)
+# npm distribution
 
 The npm package is a launcher for the native binary, the same pattern esbuild,
 Biome, SWC and oxlint use. It is not WebAssembly.

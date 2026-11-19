@@ -1,11 +1,18 @@
 [package]
 name = "apitest"
 description = "API testing and load testing with scoped fixtures, contract pinning and Rhai/JS/Python scripting"
+readme = "README.md"
+keywords = ["api", "testing", "openapi", "load-testing", "contract-testing"]
+categories = ["development-tools::testing", "web-programming::http-client"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # Lean by default: the scripting engines (QuickJS is a C build) and the

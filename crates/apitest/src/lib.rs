@@ -19,6 +19,11 @@
 //! options, responses) is a [`serde_json::Value`], so a fixture written in
 //! Rust can be consumed by a JS test and vice versa.
 
+/// Compiles and runs the README examples as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod auth;
 pub mod config;
 pub mod context;

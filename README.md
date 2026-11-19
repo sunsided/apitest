@@ -1,5 +1,15 @@
 # apitest
 
+[![CI](https://github.com/sunsided/apitest/actions/workflows/ci.yml/badge.svg)](https://github.com/sunsided/apitest/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/sunsided/apitest/graph/badge.svg)](https://codecov.io/gh/sunsided/apitest)
+[![License](https://img.shields.io/badge/license-EUPL--1.2%20OR%20MIT%20OR%20Apache--2.0-blue)](#license)
+
+| Crate | |
+|---|---|
+| [`apitest`](https://crates.io/crates/apitest) | [![crates.io](https://img.shields.io/crates/v/apitest.svg)](https://crates.io/crates/apitest) [![docs.rs](https://img.shields.io/docsrs/apitest)](https://docs.rs/apitest) |
+| [`apitest-macros`](https://crates.io/crates/apitest-macros) | [![crates.io](https://img.shields.io/crates/v/apitest-macros.svg)](https://crates.io/crates/apitest-macros) |
+| [`apitest-cli`](https://crates.io/crates/apitest-cli) | [![crates.io](https://img.shields.io/crates/v/apitest-cli.svg)](https://crates.io/crates/apitest-cli) |
+
 API testing and load testing in Rust, with:
 
 - **Reliable setup/teardown at every level.** Suite, virtual user, test, fixture and per-test hooks, plus `cx.defer(...)` cleanups. Cleanups run in LIFO order **even when a test fails, panics or times out**.
@@ -9,7 +19,7 @@ API testing and load testing in Rust, with:
 - **Library or standalone.** Use it from `cargo test` (libtest-mimic harness, with `#[apitest::test]` attribute macros if you like), with nextest (process-per-test aware), from your own code, from pytest, via the `apitest` CLI, or via `npx @apitest/cli`.
 - **In-process servers over real TCP.** `TestServer::axum(router)` (or `TestServer::spawn` for any framework) serves your app on an ephemeral port. Tests go through the whole ingress path: socket, HTTP, middleware, routing, extractors. Handlers are never called directly.
 - **Standard reports.** JUnit XML (GitHub, GitLab, Jenkins, IDEs) and JSON. Contract drift and suite setup/teardown failures show up as their own test cases.
-- **NOVA for config.** `apitest.nova` (project config) and `apitest.lock.nova` use [NOVA](https://novafile.dev/), with schemas in [`crates/apitest/schemas/`](crates/apitest/schemas) (`apitest-config.novs`, `apitest-lock.novs`). Both files are validated against them on load, with every issue reported by path. OpenAPI documents stay YAML/JSON because that's their standard format.
+- **NOVA for config.** `apitest.nova` (project config) and `apitest.lock.nova` use [NOVA](https://novafile.dev/), with schemas in [`crates/apitest/schemas/`](https://github.com/sunsided/apitest/tree/main/crates/apitest/schemas) (`apitest-config.novs`, `apitest-lock.novs`). Both files are validated against them on load, with every issue reported by path. OpenAPI documents stay YAML/JSON because that's their standard format.
 
 ## Layout
 
@@ -38,7 +48,7 @@ npm/                @apitest/cli: launcher + per-platform binary packages + Type
 demo/               billing service specs (v1.0 pinned, v1.1 compatible, v2.0 breaking), suites in Rhai/JS, apitest.nova
 ```
 
-The library crate is named `apitest` (the crates.io name is reserved for this). `publish = false` for now.
+`apitest`, `apitest-macros` and `apitest-cli` publish to crates.io with one shared version. The Python bindings build in CI but are not on PyPI yet.
 
 As a library you'd typically add it as a dev-dependency:
 
@@ -70,7 +80,7 @@ after_all / teardown → suite cleanups + fixture teardowns (LIFO)
 
 ## Writing tests
 
-The regular case should read like the scenario it tests. Here is a multi-actor, multi-service flow, condensed from [`crates/apitest/tests/care_flow.rs`](crates/apitest/tests/care_flow.rs):
+The regular case should read like the scenario it tests. Here is a multi-actor, multi-service flow, condensed from [`crates/apitest/tests/care_flow.rs`](https://github.com/sunsided/apitest/blob/main/crates/apitest/tests/care_flow.rs):
 
 1. An existing Hub admin creates a Social Service user in the global setup.
 2. A patient registers on the app as a demo user and confirms their e-mail by opening the link from the mail mock.
@@ -587,7 +597,7 @@ Each scenario checks `GET /_stats` afterwards to prove that no tokens or invoice
 
 ## npm
 
-`npx @apitest/cli run suites/` or `npm i -D @apitest/cli`. It's the native binary, delivered the way esbuild, Biome and SWC do it: a launcher package plus per-platform packages selected through `optionalDependencies` (`os`/`cpu`/`libc`), with no postinstall script and no download at runtime. It also ships `types/index.d.ts`, so JS suites get autocompletion and type checking (`// @ts-check` + `/// <reference types="@apitest/cli" />`). Suites still run in QuickJS, not Node. Details, local testing and the release flow are in [`npm/README.md`](npm/README.md). The `@apitest` npm scope still needs to be claimed (`apitest` on npm is someone else's package).
+`npx @apitest/cli run suites/` or `npm i -D @apitest/cli`. It's the native binary, delivered the way esbuild, Biome and SWC do it: a launcher package plus per-platform packages selected through `optionalDependencies` (`os`/`cpu`/`libc`), with no postinstall script and no download at runtime. It also ships `types/index.d.ts`, so JS suites get autocompletion and type checking (`// @ts-check` + `/// <reference types="@apitest/cli" />`). Suites still run in QuickJS, not Node. Details, local testing and the release flow are in [`npm/README.md`](https://github.com/sunsided/apitest/blob/main/npm/README.md). The `@apitest` npm scope still needs to be claimed (`apitest` on npm is someone else's package).
 
 ## Open questions / next steps
 
