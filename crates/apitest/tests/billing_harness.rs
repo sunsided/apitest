@@ -4,8 +4,10 @@
 //! cargo test -p apitest --features full --test `billing_harness` -- "create and fetch"
 //! `APITEST_JUNIT=target/apitest/junit.xml` cargo test -p apitest --features full --test `billing_harness`
 
+/// The billing service under test.
 #[path = "support/demo_server.rs"]
 mod demo;
+/// The billing suite written in Rust, plus the paths to its script versions.
 #[path = "support/rust_suite.rs"]
 mod rust_suite;
 
@@ -13,6 +15,7 @@ use apitest::harness::{Plan, main as harness_main};
 use apitest::script::{LoadOptions, load_suites};
 use apitest::{RunConfig, TestServer};
 
+/// Runs the Rust, Rhai and JS billing suites against one in-process 1.0 service.
 fn main() {
     harness_main(|| async {
         // The service under test runs in-process, but is reached over real TCP.

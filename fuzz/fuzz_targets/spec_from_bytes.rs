@@ -1,4 +1,4 @@
-//! Loads arbitrary bytes as an OpenAPI document, as JSON, as YAML and by sniffing.
+//! Loads arbitrary bytes as an `OpenAPI` document, as JSON, as YAML and by sniffing.
 //! Exercises `$ref` inlining on hostile documents (cycles, deep nesting).
 
 #![no_main]

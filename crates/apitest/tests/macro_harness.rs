@@ -5,12 +5,11 @@
 //! cargo test -p apitest --features full --test `macro_harness` -- `billing::create_and_fetch_invoice` --exact
 //! cargo nextest run -p apitest --features full --test `macro_harness`
 
+/// The billing service under test.
 #[path = "support/demo_server.rs"]
 mod demo;
-#[path = "support/rust_suite.rs"]
-#[expect(unused)]
-mod rust_suite;
 
+/// The billing suite: module = suite, functions = fixtures and tests.
 mod billing {
     use apitest::prelude::*;
     use serde::{Deserialize, Serialize};
@@ -21,14 +20,19 @@ mod billing {
         Ok(Suite::new("billing").contract(
             Contract::pinned(
                 "billing",
-                super::rust_suite::specs_dir().join("billing-1.0.yaml"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../demo/specs/billing-1.0.yaml"
+                ),
             )?
             .live_spec("/openapi.json"),
         ))
     }
 
+    /// The suite's login, shared with every test that asks for `session`.
     #[derive(Serialize, Deserialize)]
     pub struct Session {
+        /// The bearer token; also installed as the default `Authorization` header.
         token: String,
     }
 
@@ -53,6 +57,7 @@ mod billing {
         Ok(Session { token })
     }
 
+    /// Teardown of [`session`]: revokes the suite's token.
     async fn logout(cx: Ctx) -> Result<()> {
         cx.call("billing", "revokeToken")?
             .send()
@@ -86,6 +91,7 @@ mod billing {
         Ok(id)
     }
 
+    /// A created invoice can be read back with the same amount.
     #[apitest::test(parallel)]
     async fn create_and_fetch_invoice(cx: Ctx) -> Result<()> {
         let inv = cx
@@ -114,6 +120,7 @@ mod billing {
         Ok(())
     }
 
+    /// A fixture that depends on another fixture is injected into the test by name.
     #[apitest::test(parallel, resources = ["invoices"], timeout_ms = 5000)]
     async fn fixture_injection(cx: Ctx, usd_invoice: u64) -> Result<()> {
         let got = cx
@@ -126,6 +133,7 @@ mod billing {
         Ok(())
     }
 
+    /// Reading an id that was never issued is a `404`; the test id comes from `name`.
     #[apitest::test(parallel, name = "unknown invoice is 404")]
     async fn unknown_invoice(cx: Ctx) -> Result<()> {
         cx.call("billing", "getInvoice")?
@@ -136,6 +144,7 @@ mod billing {
         Ok(())
     }
 
+    /// A serial test sees exactly the two EUR invoices it created, nothing from other tests.
     #[apitest::test(serial)]
     async fn listing_sees_exactly_what_this_test_created(cx: Ctx) -> Result<()> {
         for amount in [1, 2] {
@@ -167,7 +176,8 @@ mod billing {
     }
 }
 
-/// Items in the crate root form a suite named after the test binary.
+/// Items in the crate root form a suite named after the test binary; this one proves the
+/// service serves its `OpenAPI` document.
 #[apitest::test]
 async fn service_publishes_its_spec(cx: apitest::Ctx) -> anyhow::Result<()> {
     cx.request("GET", "/openapi.json")
@@ -177,6 +187,7 @@ async fn service_publishes_its_spec(cx: apitest::Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Starts one in-process billing service and runs every registered suite against it.
 fn main() {
     apitest::harness::main(|| async {
         // One in-process server per test process (one per test under nextest).

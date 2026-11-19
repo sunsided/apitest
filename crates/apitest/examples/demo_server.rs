@@ -2,9 +2,11 @@
 //!
 //! cargo run -p apitest --example `demo_server` -- [port] [1.0|1.1|2.0]
 
+/// The billing service.
 #[path = "../tests/support/demo_server.rs"]
 mod demo;
 
+/// Serves the billing service on `127.0.0.1:[port]` (default 8080) until killed.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);

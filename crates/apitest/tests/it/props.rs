@@ -103,6 +103,7 @@ proptest! {
 
     /// Quantities in every unit parse to milliseconds (or a plain ratio).
     #[test]
+    #[expect(clippy::float_cmp, reason = "the parser must produce exactly these values, not approximately")]
     fn quantities_parse_in_every_unit(n in 0u32..1_000_000) {
         let v = f64::from(n);
 

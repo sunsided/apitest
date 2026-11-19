@@ -1,4 +1,4 @@
-//! Diffs two arbitrary OpenAPI documents (split at the first NUL byte) in both directions.
+//! Diffs two arbitrary `OpenAPI` documents (split at the first NUL byte) in both directions.
 //! A document must never drift from itself.
 
 #![no_main]

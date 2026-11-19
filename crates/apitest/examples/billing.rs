@@ -5,8 +5,10 @@
 //! cargo run -p apitest --features full --example billing -- 1.1     # compatible change
 //! cargo run -p apitest --features full --example billing -- 2.0     # breaking change → fails before tests run
 
+/// The billing service under test.
 #[path = "../tests/support/demo_server.rs"]
 mod demo;
+/// The billing suite written in Rust, plus the paths to its script versions.
 #[path = "../tests/support/rust_suite.rs"]
 mod rust_suite;
 
@@ -14,6 +16,8 @@ use apitest::prelude::*;
 use apitest::report::junit_xml;
 use apitest::script::{LoadOptions, load_suites};
 
+/// Runs all billing suites against the variant named by the first argument (default
+/// `1.0`), prints each report and writes `target/apitest/junit.xml`; exits 1 on failure.
 #[tokio::main]
 async fn main() -> Result<()> {
     let variant: demo::Variant = std::env::args()

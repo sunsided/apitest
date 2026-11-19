@@ -13,19 +13,24 @@
 //!
 //! cargo test -p apitest --features full --test `care_flow`
 
+/// The hub, app and mail services under test.
 #[path = "support/care.rs"]
 mod care;
 
+/// The onboarding suite: one patient's way from registration to a running case.
 mod onboarding {
     use apitest::prelude::*;
     use serde::Deserialize;
 
+    /// Password used for every account the suite creates.
     const PASSWORD: &str = "correct horse battery";
 
+    /// Directory with the pinned hub and app specs.
     fn specs() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/care")
     }
 
+    /// Base suite: both services are pinned to their 1.0 contracts and checked for drift.
     #[apitest::suite]
     fn onboarding() -> Result<Suite> {
         Ok(Suite::new("onboarding")
@@ -40,6 +45,10 @@ mod onboarding {
     /// The pre-existing Hub admin: a named actor from the run config
     /// (`actors:` in apitest.nova), logging in lazily with ${`HUB_ADMIN_EMAIL`} / ${`HUB_ADMIN_PASSWORD`}.
     #[apitest::fixture(scope = "suite")]
+    #[expect(
+        clippy::unused_async,
+        reason = "the fixture macro only accepts `async fn`"
+    )]
     async fn hub_admin() -> Result<Actor> {
         actor("hub_admin")
     }
@@ -59,20 +68,35 @@ mod onboarding {
                     .expect(204)
             })
             .await?;
+
         // Logs in lazily on first use; no token handling here.
         Ok(Actor::on("hub").login(email, PASSWORD))
     }
 
+    /// An e-mail as the mail mock returns it; only the body matters here.
     #[derive(Deserialize)]
     struct Mail {
+        /// HTML body, containing the confirmation link.
         html: String,
     }
 
-    #[apitest::test]
-    async fn patient_onboarding(social_worker: Actor) -> Result<()> {
-        let (app, mail) = (Actor::on("app"), Actor::on("mail"));
-        let email = unique_email("patient");
+    /// Waits for the confirmation e-mail sent to `email` and opens its link.
+    async fn open_confirmation_link(mail: &Actor, email: &str) -> Result<()> {
+        let message: Mail = eventually!(
+            mail.get("/messages")
+                .query("to", email)
+                .expect(200)
+                .await?
+                .get("/0")
+        )?;
+        visit(&link_containing(&message.html, "/confirm")?).await?;
 
+        Ok(())
+    }
+
+    /// Registers `email` as a demo patient and confirms the address, one step each.
+    async fn register_confirmed_patient(email: &str) -> Result<()> {
+        let (app, mail) = (Actor::on("app"), Actor::on("mail"));
         step(
             "patient registers as a demo user",
             app.call("registerPatient")
@@ -81,33 +105,64 @@ mod onboarding {
                 .expect_json(json!({ "status": "pending_confirmation", "demo": true })),
         )
         .await?;
-        undo(mail.delete("/messages").query("to", &email))?;
+        undo(mail.delete("/messages").query("to", email))?;
 
-        step("patient confirms the e-mail by opening the link", async {
-            let message: Mail = eventually!(
-                mail.get("/messages")
-                    .query("to", &email)
-                    .expect(200)
-                    .await?
-                    .get("/0")
-            )?;
-            visit(&link_containing(&message.html, "/confirm")?).await
-        })
-        .await?;
+        step(
+            "patient confirms the e-mail by opening the link",
+            open_confirmation_link(&mail, email),
+        )
+        .await
+    }
 
+    /// Logs the confirmed patient in and returns a fresh activation code, one step each.
+    async fn activation_code_for(email: &str) -> Result<String> {
         let patient = step(
             "patient logs in",
-            Actor::on("app").login(&email, PASSWORD).signed_in(),
+            Actor::on("app").login(email, PASSWORD).signed_in(),
         )
         .await?;
         undo(patient.call("deletePatient").expect(204))?;
 
-        let code: String = step(
+        step(
             "patient creates an activation code",
             patient.call("createActivationCode").expect(201),
         )
         .await?
-        .get("/code")?;
+        .get("/code")
+    }
+
+    /// Stores therapy data for the case and moves it to `in_progress`, one step each.
+    async fn start_case(social_worker: &Actor, case_id: &str) -> Result<()> {
+        step(
+            "social worker records therapy data",
+            social_worker
+                .call("putTherapy")
+                .path("id", case_id)
+                .json(json!({ "plan": "CBT", "sessions_per_week": 2 }))
+                .expect(200),
+        )
+        .await?;
+
+        step(
+            "case moves to in progress",
+            social_worker
+                .call("updateCase")
+                .path("id", case_id)
+                .json(json!({ "status": "in_progress" }))
+                .expect(200),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// The happy path across all three services ends with a started case that carries
+    /// the patient and the therapy data; every created record is rolled back.
+    #[apitest::test]
+    async fn patient_onboarding(social_worker: Actor) -> Result<()> {
+        let email = unique_email("patient");
+        register_confirmed_patient(&email).await?;
+        let code = activation_code_for(&email).await?;
 
         let case = step(
             "social worker identifies the patient by code",
@@ -124,26 +179,7 @@ mod onboarding {
         )
         .await?;
         let case_id: String = case.get("/id")?;
-
-        step(
-            "social worker records therapy data",
-            social_worker
-                .call("putTherapy")
-                .path("id", &case_id)
-                .json(json!({ "plan": "CBT", "sessions_per_week": 2 }))
-                .expect(200),
-        )
-        .await?;
-
-        step(
-            "case moves to in progress",
-            social_worker
-                .call("updateCase")
-                .path("id", &case_id)
-                .json(json!({ "status": "in_progress" }))
-                .expect(200),
-        )
-        .await?;
+        start_case(&social_worker, &case_id).await?;
 
         let current = social_worker
             .call("getCase")
@@ -155,6 +191,7 @@ mod onboarding {
             "patient_id": case["patient_id"],
             "therapy": { "plan": "CBT", "sessions_per_week": 2 }
         });
+
         Ok(())
     }
 
@@ -170,14 +207,7 @@ mod onboarding {
             .await?;
         let mail = Actor::on("mail");
         undo(mail.delete("/messages").query("to", &email))?;
-        let message: Mail = eventually!(
-            mail.get("/messages")
-                .query("to", &email)
-                .expect(200)
-                .await?
-                .get("/0")
-        )?;
-        visit(&link_containing(&message.html, "/confirm")?).await?;
+        open_confirmation_link(&mail, &email).await?;
         let patient = Actor::on("app").login(&email, PASSWORD);
         undo(patient.call("deletePatient").expect(204))?;
         let code: String = patient
@@ -206,10 +236,13 @@ mod onboarding {
             .expect(409)
             .await?;
         assert_json!(refused, { "error": "a case needs therapy data before it can start" });
+
         Ok(())
     }
 }
 
+/// Starts the three services, runs the registered suites against them and finally proves
+/// that the rollbacks left no test data behind.
 fn main() {
     apitest::harness::main(|| async {
         let services = care::Care::start().await?;

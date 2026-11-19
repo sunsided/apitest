@@ -1,8 +1,10 @@
 //! Behavioural tests of the runner: contract drift, guaranteed cleanup,
 //! scheduling, lockfile, reports and load.
 
+/// The billing service under test.
 #[path = "../support/demo_server.rs"]
 mod demo;
+/// The billing suite written in Rust, plus the paths to its specs and script versions.
 #[path = "../support/rust_suite.rs"]
 mod rust_suite;
 
@@ -16,10 +18,12 @@ use apitest::prelude::*;
 use apitest::report::{Outcome, junit_xml};
 use apitest::script::{LoadOptions, load_suites};
 
+/// Starts the billing service in the given version.
 async fn server(v: demo::Variant) -> TestServer {
     TestServer::axum(demo::app(v)).await.unwrap()
 }
 
+/// A quiet run config against `srv` with the demo credentials as variables.
 fn cfg(srv: &TestServer) -> RunConfig {
     RunConfig::new(srv.base_url())
         .var("API_USER", "demo")
@@ -27,6 +31,7 @@ fn cfg(srv: &TestServer) -> RunConfig {
         .quiet(true)
 }
 
+/// The service's leftover counters (`{"tokens": n, "invoices": n}`).
 async fn stats(srv: &TestServer) -> Value {
     reqwest::get(format!("{}/_stats", srv.base_url()))
         .await
@@ -36,6 +41,7 @@ async fn stats(srv: &TestServer) -> Value {
         .unwrap()
 }
 
+/// Against the pinned version the suite passes and leaves no tokens or invoices behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn passes_and_cleans_up_against_pinned_version() {
     let srv = server(demo::Variant::V1_0).await;
@@ -48,6 +54,7 @@ async fn passes_and_cleans_up_against_pinned_version() {
     );
 }
 
+/// A compatible 1.1 passes; its additions are reported as informational drift.
 #[tokio::test(flavor = "multi_thread")]
 async fn compatible_minor_version_passes() {
     let srv = server(demo::Variant::V1_1).await;
@@ -64,6 +71,8 @@ async fn compatible_minor_version_passes() {
     );
 }
 
+/// A breaking 2.0 fails the suite during setup with the breaking findings listed,
+/// skips every test and therefore creates nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn breaking_major_version_fails_loudly_before_any_test_runs() {
     let srv = server(demo::Variant::V2_0).await;
@@ -111,6 +120,8 @@ async fn breaking_major_version_fails_loudly_before_any_test_runs() {
     assert_eq!(stats(&srv).await, json!({ "tokens": 0, "invoices": 0 }));
 }
 
+/// With the drift check off, validating responses against the pinned contract still
+/// catches the 2.0 payload, and cleanup still runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_validation_catches_drift_when_drift_check_is_off() {
     let srv = server(demo::Variant::V2_0).await;
@@ -161,74 +172,85 @@ async fn runtime_validation_catches_drift_when_drift_check_is_off() {
     assert_eq!(stats(&srv).await, json!({ "tokens": 0, "invoices": 0 }));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn cleanups_run_after_failures_panics_and_timeouts() {
-    let srv = server(demo::Variant::V1_0).await;
-    let create = |cx: Ctx| async move {
-        let inv = cx
-            .call("billing", "createInvoice")?
-            .json(json!({ "amount": 7, "currency": "EUR" }))
+/// Creates an invoice and defers its deletion, the cleanup the failing tests rely on.
+async fn create_invoice_with_cleanup(cx: Ctx) -> Result<()> {
+    let inv = cx
+        .call("billing", "createInvoice")?
+        .json(json!({ "amount": 7, "currency": "EUR" }))
+        .send()
+        .await?
+        .expect(201)?;
+    let id = inv.pointer("/id").cloned().unwrap();
+    cx.defer("delete", move |cx| async move {
+        cx.call("billing", "deleteInvoice")?
+            .path_param("id", id)
             .send()
             .await?
-            .expect(201)?;
-        let id = inv.pointer("/id").cloned().unwrap();
-        cx.defer("delete", move |cx| async move {
-            cx.call("billing", "deleteInvoice")?
-                .path_param("id", id)
-                .send()
-                .await?
-                .expect(204)?;
-            Ok(())
-        });
-        anyhow::Ok(())
-    };
-    let suite = Suite::new("cleanup")
+            .expect(204)?;
+        Ok(())
+    });
+
+    anyhow::Ok(())
+}
+
+/// Suite fixture: logs in as `demo` and installs the token as the default header.
+async fn log_in(cx: Ctx) -> Result<String> {
+    let t = cx
+        .call("billing", "issueToken")?
+        .form(&[("user", "demo"), ("pass", "secret")])
+        .send()
+        .await?
+        .expect(200)?;
+    let tok = t
+        .pointer("/access_token")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+
+    cx.default_header("Authorization", format!("Bearer {tok}"));
+    Ok(tok)
+}
+
+/// Teardown of [`log_in`]: revokes the suite's token.
+async fn revoke_token(cx: Ctx) -> Result<()> {
+    cx.call("billing", "revokeToken")?
+        .send()
+        .await?
+        .expect(204)?;
+    Ok(())
+}
+
+/// A suite whose three tests each create an invoice and then fail, panic or time out.
+fn failing_suite() -> Suite {
+    Suite::new("cleanup")
         .pinned("billing", rust_suite::specs_dir().join("billing-1.0.yaml"))
         .unwrap()
-        .fixture_with_teardown(
-            "token",
-            Scope::Suite,
-            |cx| async move {
-                let t = cx
-                    .call("billing", "issueToken")?
-                    .form(&[("user", "demo"), ("pass", "secret")])
-                    .send()
-                    .await?
-                    .expect(200)?;
-                let tok = t
-                    .pointer("/access_token")
-                    .and_then(Value::as_str)
-                    .unwrap()
-                    .to_string();
-                cx.default_header("Authorization", format!("Bearer {tok}"));
-                Ok(tok)
-            },
-            |cx| async move {
-                cx.call("billing", "revokeToken")?
-                    .send()
-                    .await?
-                    .expect(204)?;
-                Ok(())
-            },
-        )
-        .test("fails", move |cx| async move {
-            create(cx).await?;
+        .fixture_with_teardown("token", Scope::Suite, log_in, revoke_token)
+        .test("fails", |cx| async move {
+            create_invoice_with_cleanup(cx).await?;
             bail!("boom")
         })
-        .test("panics", move |cx| async move {
-            create(cx).await?;
+        .test("panics", |cx| async move {
+            create_invoice_with_cleanup(cx).await?;
             panic!("kaboom")
         })
         .test_with(
             "times out",
             TestOpts::serial().timeout(Duration::from_millis(200)),
-            move |cx| async move {
-                create(cx).await?;
+            |cx| async move {
+                create_invoice_with_cleanup(cx).await?;
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 Ok(())
             },
-        );
-    let report = run_suite(&suite, &cfg(&srv)).await;
+        )
+}
+
+/// Deferred cleanups and fixture teardowns run whether a test fails, panics or times out,
+/// and none of them reports an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn cleanups_run_after_failures_panics_and_timeouts() {
+    let srv = server(demo::Variant::V1_0).await;
+    let report = run_suite(&failing_suite(), &cfg(&srv)).await;
     let msgs: Vec<String> = report
         .tests
         .iter()
@@ -237,6 +259,7 @@ async fn cleanups_run_after_failures_panics_and_timeouts() {
             o => format!("{o:?}"),
         })
         .collect();
+
     assert!(msgs[0].contains("boom"));
     assert!(msgs[1].contains("panicked: kaboom"));
     assert!(msgs[2].contains("timed out"));
@@ -248,14 +271,25 @@ async fn cleanups_run_after_failures_panics_and_timeouts() {
     assert_eq!(stats(&srv).await, json!({ "tokens": 0, "invoices": 0 }));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn serial_tests_run_alone_and_parallel_tests_overlap() {
-    let running = Arc::new(AtomicUsize::new(0));
-    let max_seen = Arc::new(AtomicUsize::new(0));
-    let serial_saw_others = Arc::new(AtomicUsize::new(0));
-    let mut suite = Suite::new("sched");
+/// Shared counters the scheduling tests update while they run.
+#[derive(Clone, Default)]
+struct Gauges {
+    /// Parallel tests running right now.
+    running: Arc<AtomicUsize>,
+    /// Highest value [`Gauges::running`] reached.
+    max_seen: Arc<AtomicUsize>,
+    /// What the serial test saw in [`Gauges::running`]; must stay 0.
+    serial_saw_others: Arc<AtomicUsize>,
+    /// Resource-sharing tests running right now.
+    shared: Arc<AtomicUsize>,
+    /// How often a resource-sharing test found another one running; must stay 0.
+    overlap: Arc<AtomicUsize>,
+}
+
+/// Adds four parallel tests that each stay running for 150 ms and record the overlap.
+fn with_parallel_tests(mut suite: Suite, g: &Gauges) -> Suite {
     for i in 0..4 {
-        let (r, m) = (running.clone(), max_seen.clone());
+        let (r, m) = (g.running.clone(), g.max_seen.clone());
         suite = suite.test_with(&format!("parallel {i}"), TestOpts::parallel(), move |_| {
             let (r, m) = (r.clone(), m.clone());
             async move {
@@ -267,19 +301,26 @@ async fn serial_tests_run_alone_and_parallel_tests_overlap() {
             }
         });
     }
-    let (r, s) = (running.clone(), serial_saw_others.clone());
-    suite = suite.test_with("serial", TestOpts::serial(), move |_| {
+
+    suite
+}
+
+/// Adds a serial test that records how many parallel tests were running alongside it.
+fn with_serial_test(suite: Suite, g: &Gauges) -> Suite {
+    let (r, s) = (g.running.clone(), g.serial_saw_others.clone());
+    suite.test_with("serial", TestOpts::serial(), move |_| {
         let (r, s) = (r.clone(), s.clone());
         async move {
             s.store(r.load(Ordering::SeqCst), Ordering::SeqCst);
             Ok(())
         }
-    });
-    // Two parallel tests sharing a resource must not overlap.
-    let shared = Arc::new(AtomicUsize::new(0));
-    let overlap = Arc::new(AtomicUsize::new(0));
+    })
+}
+
+/// Adds two parallel tests sharing the `db` resource that count any overlap.
+fn with_resource_tests(mut suite: Suite, g: &Gauges) -> Suite {
     for i in 0..2 {
-        let (sh, ov) = (shared.clone(), overlap.clone());
+        let (sh, ov) = (g.shared.clone(), g.overlap.clone());
         suite = suite.test_with(
             &format!("db {i}"),
             TestOpts::parallel().resource("db"),
@@ -289,6 +330,7 @@ async fn serial_tests_run_alone_and_parallel_tests_overlap() {
                     if sh.fetch_add(1, Ordering::SeqCst) > 0 {
                         ov.fetch_add(1, Ordering::SeqCst);
                     }
+
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     sh.fetch_sub(1, Ordering::SeqCst);
                     Ok(())
@@ -296,13 +338,28 @@ async fn serial_tests_run_alone_and_parallel_tests_overlap() {
             },
         );
     }
+
+    suite
+}
+
+/// Parallel tests overlap, a serial test runs alone, tests sharing a resource are
+/// serialized, and the report keeps declaration order.
+#[tokio::test(flavor = "multi_thread")]
+async fn serial_tests_run_alone_and_parallel_tests_overlap() {
+    let g = Gauges::default();
+    let suite = with_parallel_tests(Suite::new("sched"), &g);
+    let suite = with_serial_test(suite, &g);
+    // Two parallel tests sharing a resource must not overlap.
+    let suite = with_resource_tests(suite, &g);
     let mut c = RunConfig::new("http://127.0.0.1:9");
     c.max_parallel = 8;
+
     let started = Instant::now();
     let report = run_suite(&suite, &c).await;
     report.assert_passed();
+
     assert_eq!(
-        max_seen.load(Ordering::SeqCst),
+        g.max_seen.load(Ordering::SeqCst),
         4,
         "parallel tests should overlap"
     );
@@ -312,12 +369,12 @@ async fn serial_tests_run_alone_and_parallel_tests_overlap() {
         started.elapsed()
     );
     assert_eq!(
-        serial_saw_others.load(Ordering::SeqCst),
+        g.serial_saw_others.load(Ordering::SeqCst),
         0,
         "serial test must run alone"
     );
     assert_eq!(
-        overlap.load(Ordering::SeqCst),
+        g.overlap.load(Ordering::SeqCst),
         0,
         "resource lock must serialize"
     );
@@ -325,6 +382,8 @@ async fn serial_tests_run_alone_and_parallel_tests_overlap() {
     assert_eq!(report.tests[4].name, "serial");
 }
 
+/// The lockfile records the operations, fields and statuses the suite used, and later
+/// drift checks only cover that surface.
 #[tokio::test(flavor = "multi_thread")]
 async fn lockfile_records_used_surface_and_narrows_drift_checks() {
     let dir = std::env::temp_dir().join(format!("apitest-lock-{}", std::process::id()));
@@ -362,6 +421,7 @@ async fn lockfile_records_used_surface_and_narrows_drift_checks() {
     );
 }
 
+/// A live document handed over in-process is diffed like a fetched one.
 #[tokio::test(flavor = "multi_thread")]
 async fn utoipa_style_in_process_live_document() {
     let srv = server(demo::Variant::V1_0).await;
@@ -379,6 +439,7 @@ async fn utoipa_style_in_process_live_document() {
     assert_eq!(report.drift[0].source, "in-process document");
 }
 
+/// The `JUnit` report contains the contract failure and the skipped tests.
 #[tokio::test(flavor = "multi_thread")]
 async fn junit_report_is_well_formed_enough() {
     let srv = server(demo::Variant::V2_0).await;
@@ -390,6 +451,7 @@ async fn junit_report_is_well_formed_enough() {
     assert!(xml.contains("<skipped"));
 }
 
+/// The Rhai and JS versions of the suite pass and clean up like the Rust one.
 #[tokio::test(flavor = "multi_thread")]
 async fn script_suites_pass_and_clean_up() {
     for file in ["billing.rhai", "billing.js"] {
@@ -410,6 +472,7 @@ async fn script_suites_pass_and_clean_up() {
     }
 }
 
+/// Load scenarios reuse functional tests, meet their thresholds and still clean up.
 #[tokio::test(flavor = "multi_thread")]
 async fn load_reuses_functional_tests() {
     let srv = server(demo::Variant::V1_0).await;
@@ -444,6 +507,7 @@ async fn load_reuses_functional_tests() {
     assert_eq!(stats(&srv).await, json!({ "tokens": 0, "invoices": 0 }));
 }
 
+/// A ramping JS load run gives each virtual user its own runtime and login, and cleans up.
 #[tokio::test(flavor = "multi_thread")]
 async fn js_load_with_one_runtime_per_vu_and_vu_scoped_login() {
     let srv = server(demo::Variant::V1_0).await;
