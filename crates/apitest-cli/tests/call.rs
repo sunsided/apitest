@@ -447,7 +447,8 @@ fn headers_an_actor_sets_cannot_be_replaced() {
             "Authorization: Bearer mine",
         ],
     );
-    assert_eq!(v["authorization"], "Bearer mine");
+    // A -H credential is registered as a secret, so the echo shows it masked.
+    assert_eq!(v["authorization"], "***");
     assert_eq!(v["tenant"], "7");
 }
 
@@ -606,4 +607,49 @@ fn an_expected_redirect_is_not_reported() {
     let o = apitest(&dir, &["hub", "GET", "/away", "--expect", "303"]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(stderr(&o), "");
+}
+
+#[test]
+fn verbose_shows_the_query_and_redacts_credentials_from_flags() {
+    let url = serve();
+    let dir = project(&url, "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/echo?a=1",
+            "--query",
+            "page=2",
+            "--query",
+            "access_token=q-secret",
+            "-H",
+            "X-Auth-Token: h-secret",
+            "-H",
+            "Authorization: Token two words",
+            "-v",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let err = stderr(&o);
+    assert!(
+        err.contains(&format!("> GET {url}/echo?a=1&page=2&access_token=***")),
+        "{err}"
+    );
+    assert!(err.contains("X-Auth-Token: ***"), "{err}");
+    assert!(err.contains("Authorization: Token ***"), "{err}");
+    for secret in ["q-secret", "h-secret", "two words"] {
+        assert!(!err.contains(secret), "{secret} leaked: {err}");
+    }
+
+    // Query values are only masked in -v: a name like `keyword` contains `key`,
+    // and the echoed data on stdout must stay intact.
+    let out = stdout(&o);
+    assert!(out.contains(r#""access_token":"q-secret""#), "{out}");
+    let v = echo_json(
+        &dir,
+        &["hub", "GET", "/echo", "--query", "keyword=red shoes", "-v"],
+    );
+    assert_eq!(v["query"]["keyword"], "red shoes");
 }

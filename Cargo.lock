@@ -136,6 +136,7 @@ dependencies = [
  "apitest",
  "axum",
  "clap",
+ "reqwest",
  "serde_json",
  "tokio",
 ]
