@@ -13,7 +13,7 @@
 API testing and load testing in Rust, with:
 
 - **Reliable setup/teardown at every level.** Suite, virtual user, test, fixture and per-test hooks, plus `cx.defer(...)` cleanups. Cleanups run in LIFO order **even when a test fails, panics or times out**.
-- **Contract pinning.** Suites bind to a checked-in OpenAPI document via `operationId`. Requests and responses are validated against it. Before any test runs, the service's *live* spec is diffed against the pin, limited to the operations and fields the suites actually use (recorded in `apitest.lock.nova`). Incompatible changes fail loudly.
+- **Contract pinning.** Suites bind to a checked-in OpenAPI document via `operationId`. Requests and responses are validated against it. Before any test runs, the service's *live* spec is diffed against the pin, limited to the operations and fields the suites actually use (recorded in `apitest.lock.nova`). Instead of, or besides, the live spec you can pick named comparison specs (files or URLs, e.g. what dev, QA and prod run, or your local branch), so the check doesn't need a running service. Incompatible changes fail loudly, reported per target.
 - **One core, four frontends.** Suites can be written in **Rust, Rhai, JavaScript (QuickJS) or Python**. Every frontend gets the same `cx` API and the same semantics. Fixture values are JSON, so a Rust fixture can feed a JS test.
 - **Functional and load runs from the same tests.** Any test can be a load scenario: constant VUs, a shared iteration budget, or ramping stages. You get HDR latency histograms and k6-style thresholds (`http.p95 < 300ms`).
 - **Library or standalone.** Use it from `cargo test` (libtest-mimic harness, with `#[apitest::test]` attribute macros if you like), with nextest (process-per-test aware), from your own code, from pytest, via the `apitest` CLI, or via `npx @apitest/cli`.
@@ -528,6 +528,34 @@ suite billing-rust
 - **Runtime validation** still catches drift when the live spec lies or isn't published: `contract violation: response 200 of getInvoice does not match pinned 'billing' v1.0.0: /id: "2" is not of type "integer"`. Under load it is sampled (`validate_every`).
 - **utoipa:** pass the generated document directly, with no HTTP fetch: `Contract::pinned("api", "contracts/api-3.2.yaml")?.live_document(serde_json::to_value(ApiDoc::openapi())?)`.
 - **CI without a running service:** `apitest contract diff pinned.yaml candidate.yaml` exits 1 on breaking changes.
+- **Comparison specs (drift targets).** The live spec is one target, `live`. Name others in `apitest.nova`, one spec per contract, as a file path (relative to the config) or an `http(s)://` URL:
+
+  ```text
+  drift:
+    against: [live, prod]          # default selection; omitted = [live]
+    targets:
+      dev:
+        billing: https://billing.dev.example.com/openapi.json
+      qa:
+        billing: https://billing.qa.example.com/openapi.json
+      prod:
+        billing: specs/billing-prod.yaml
+      branch:
+        billing: ../billing-service/openapi.yaml
+  ```
+
+  `--against dev,prod` (or `RunConfig::drift_against`) picks targets for one run and replaces `drift.against`. `all` means `live` plus every named target. A selection without `live` fetches nothing from the service, so `apitest contract check --against prod` works offline. `--against-spec billing=path/or/url` checks a one-off spec (target `cli`) without touching the config.
+
+  Each contract is diffed against each selected target with the same lockfile-limited diff. Each pair gets its own report line, JSON entry and `[contract] billing @ prod` case in JUnit and the harness (`live` keeps the plain `[contract] billing` name). A breaking result from any selected target fails the suite. Targets without a spec for a contract skip it. A selected target naming a contract that no project suite has is an error in the CLI, since it is almost always a typo. In Rust:
+
+  ```rust
+  let cfg = RunConfig::new(url)
+      .drift_target(
+          "prod",
+          DriftTarget::new().file("billing", "specs/billing-prod.yaml"),
+      )
+      .drift_against(["live", "prod"]);
+  ```
 
 ## Using it as a library (axum example)
 
@@ -645,6 +673,10 @@ cargo run -p apitest-cli -- contract check demo/suites/billing.rhai -u http://12
 cargo run -p apitest-cli -- contract diff demo/specs/billing-1.0.yaml demo/specs/billing-2.0.yaml
 ```
 
+```bash
+cd demo && cargo run -p apitest-cli -- contract check --against qa,next   # drift targets from apitest.nova, no server needed
+```
+
 `demo/apitest.nova`:
 
 ```text
@@ -659,6 +691,12 @@ suites:
   - suites/billing.js
 reports:
   junit: ../target/apitest/junit.xml
+drift:
+  targets:
+    qa:
+      billing: specs/billing-1.1.yaml
+    next:
+      billing: specs/billing-2.0.yaml
 ```
 
 Exit codes: 0 passed, 1 tests or thresholds failed, 2 usage or config error.
@@ -772,6 +810,7 @@ Each scenario checks `GET /_stats` afterwards to prove that no tokens or invoice
 - **Scripts are synchronous.** That's simple and k6-like, but a JS `async` API on rquickjs's async runtime would allow fan-out inside one test.
 - **Rhai `before_request` hooks** aren't possible yet: a hook would re-enter the worker that's blocked on the request. Default headers cover auth for now. A Rust-side `RequestHook` trait would be easy to add.
 - **Drift diff coverage.** It handles types, properties, required, enums, items, params, statuses and bodies. Not yet: `oneOf`/`anyOf`/`allOf`, discriminators, headers, content types other than JSON, security schemes, and recursive `$ref`s beyond depth 32.
+- **Report-only drift targets.** Every selected target gates the suite today. A per-target `fail: false` would let `dev` report drift without blocking the run.
 - **Per-test contract usage.** The lockfile records usage per contract; recording it per test would make "which tests depend on X" queries possible.
 - **Reports.** JUnit and JSON exist; CTRF, TAP or a live event stream (JSON lines) for dashboards would be next.
 - **Ctrl-C.** Cleanups currently run on normal completion, failures, panics and timeouts, but not on SIGINT. That needs a cancellation token threaded through the runner.
