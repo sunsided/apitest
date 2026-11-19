@@ -580,7 +580,7 @@ Feature: billing-feature
 ```
 
 - **Tags.** `@contract:NAME=PATH`, `@live_spec:NAME=URL` and `@mode:NAME=MODE` on the feature declare contracts. `@parallel`, `@serial`, `@resource:NAME` and `@timeout:5s` on a feature, rule, scenario or `Examples:` block become test options (the innermost `@parallel`/`@serial` wins); other tags become test tags. `apitest run --tags "@smoke and not @slow"` selects scenarios.
-- **Values.** `${NAME}` is a variable (`--var`, the environment, `.env` files, `vars:`), `{{name}}` a value remembered with `I remember the response at "/id" as "name"`, and `{{response:/ptr}}` the latest response. Unresolved ones fail the step. Login and basic-auth steps keep `${NAME}` for the actor's credentials, so they are resolved and masked like configured actors; bearer tokens and actor headers are masked from the step that sets them.
+- **Values.** `${NAME}` is a variable (`--var`, the environment, `.env` files, `vars:`), `{{name}}` a value remembered with `I remember the response at "/id" as "name"`, and `{{response:/ptr}}` the latest response. Unresolved ones fail the step. Login and basic-auth steps keep `${NAME}` for the actor's credentials, so they are resolved and masked like configured actors; bearer tokens and actor headers that come from a variable or a response are masked from the step that sets them. JSON is parsed before values are inserted into its strings, and values in a raw request path are percent-encoded, so a response can neither restructure a body nor redirect a request (and its credentials) to another host.
 - **Undefined or ambiguous steps** fail the load, with their lines, before anything is sent.
 
 Custom steps are Rust functions, registered next to the built-in ones:

@@ -32,7 +32,7 @@ Feature: billing-feature
     Then the status is 200
     And the response contains:
       """json
-      { "id": {{id}}, "amount": 4200, "currency": "EUR", "status": "open" }
+      { "id": "{{id}}", "amount": 4200, "currency": "EUR", "status": "open" }
       """
 
   @parallel

@@ -22,7 +22,12 @@ applyTo: "crates/apitest/src/script/**,crates/apitest/src/script.rs,crates/apite
   matched at load time, so undefined and ambiguous steps fail the load with `file:line`.
 - A built-in step that sends a request goes through an `Actor` and `Request`, so validation,
   auth, tracing and redaction apply as in the other frontends. Steps that learn a credential
-  (bearer token, header value) register it with the run's `Redactor` right away.
+  from a variable or a response (bearer token, header value) register it with the run's
+  `Redactor` right away.
+- Values from responses and variables never change what a step does: JSON is parsed before
+  `${..}`/`{{..}}` are resolved inside its strings (`World::interpolate_json`), values in a
+  raw path are percent-encoded segments (`World::interpolate_path`), inserted text is never
+  scanned for templates again, and an actor's credentials go only to its service's origin.
 - The `--tags` parser and the `.feature` loader handle untrusted input: keep the property
   tests in `tests/it/props.rs` and the `gherkin` fuzz target passing, and keep arithmetic on
   user-given durations saturating.

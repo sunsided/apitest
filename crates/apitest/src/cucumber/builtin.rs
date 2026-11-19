@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 
 use super::steps::{StepArgs, Steps};
 use super::world::World;
+use crate::auth::Auth;
 use crate::dsl::{Actor, json_includes, unique, unique_email};
 use crate::http::{Request, RequestOpts, truncate};
 
@@ -121,11 +122,13 @@ async fn login_actor(w: World, a: StepArgs) -> Result<()> {
     Ok(())
 }
 
-/// `"a" is an actor on "svc" with the bearer token "t"`. The token is masked
-/// from here on.
+/// `"a" is an actor on "svc" with the bearer token "t"`. A token taken from a
+/// remembered value or a response is masked from here on; a `${NAME}` is
+/// masked by the actor's `Auth` when it is resolved.
 async fn bearer_actor(w: World, a: StepArgs) -> Result<()> {
-    let token = w.interpolate_values(a.get(3)?)?;
-    w.cx().config().redactor.secret(&token);
+    let raw = a.get(3)?;
+    let token = w.interpolate_values(raw)?;
+    mask_resolved(&w, raw, &token);
     let actor = Actor::on(&w.interpolate(a.get(2)?)?).bearer(token);
     w.set_actor(a.get(1)?, actor);
     Ok(())
@@ -141,14 +144,24 @@ async fn basic_actor(w: World, a: StepArgs) -> Result<()> {
     Ok(())
 }
 
-/// `"a" sends the header "H" with "v"`. Actor header values usually carry keys
-/// or tokens, so the value is masked from here on.
+/// `"a" sends the header "H" with "v"`. A value that came from a variable, a
+/// remembered value or a response usually carries a key or token, so it is
+/// masked from here on. A literal value (`application/json`) is not.
 async fn actor_header(w: World, a: StepArgs) -> Result<()> {
-    let value = w.interpolate(a.get(3)?)?;
-    w.cx().config().redactor.secret(&value);
+    let raw = a.get(3)?;
+    let value = w.interpolate(raw)?;
+    mask_resolved(&w, raw, &value);
     let actor = w.actor(a.get(1)?)?.with_header(a.get(2)?, value);
     w.set_actor(a.get(1)?, actor);
     Ok(())
+}
+
+/// Registers `resolved` with the run's redactor when it came from somewhere
+/// other than the step text `raw` and holds no template left for later.
+fn mask_resolved(w: &World, raw: &str, resolved: &str) {
+    if resolved != raw && !resolved.contains("${") {
+        w.cx().config().redactor.secret(resolved);
+    }
 }
 
 /// A request step: sends the request, or with `afterwards` registers it as a
@@ -210,7 +223,7 @@ async fn check_status(w: World, a: StepArgs) -> Result<()> {
 
 /// `the response contains:` with a JSON docstring, matched partially.
 async fn check_contains(w: World, a: StepArgs) -> Result<()> {
-    let expected = parse_json(&w.interpolate(a.docstring()?)?)?;
+    let expected = w.interpolate_json(a.docstring()?)?;
     let resp = w.response()?;
     json_includes(&resp.body, &expected)
         .with_context(|| format!("response: {}", truncate(&resp.text, 300)))
@@ -219,7 +232,7 @@ async fn check_contains(w: World, a: StepArgs) -> Result<()> {
 /// `the response at "/ptr" is <JSON>`.
 async fn check_at(w: World, a: StepArgs) -> Result<()> {
     let ptr = a.get(1)?;
-    let expected = parse_json(&w.interpolate(a.get(2)?)?)?;
+    let expected = w.interpolate_json(a.get(2)?)?;
     let actual = w.response_at(ptr)?;
     ensure!(
         same(&actual, &expected),
@@ -272,17 +285,10 @@ pub(super) async fn resend(w: &World) -> Result<()> {
 /// Builds the request of a request step (captures as in [`request_pattern`]).
 fn build_request(w: &World, a: &StepArgs) -> Result<Request<'static>> {
     let actor = w.actor(a.get(2)?)?;
-    let mut opts = request_opts(w, a)?;
+    let opts = request_opts(w, a)?;
     let mut req = match (a.opt(3), a.opt(4), a.opt(5)) {
         (Some(op), _, _) => actor.call(&w.interpolate(op)?).opts(opts),
-        (None, Some(method), Some(path)) => {
-            // `.opts(..)` replaces the options, including the actor's service.
-            if opts.service.is_none() {
-                opts.service.clone_from(&actor.service);
-            }
-
-            actor.request(method, &w.interpolate(path)?).opts(opts)
-        }
+        (None, Some(method), Some(path)) => raw_request(w, &actor, method, path, opts)?,
         _ => bail!("request step without an operation or a method and path"),
     };
 
@@ -291,6 +297,57 @@ fn build_request(w: &World, a: &StepArgs) -> Result<Request<'static>> {
     }
 
     Ok(req)
+}
+
+/// A raw request of `actor` to `path` as written in the step.
+///
+/// Values inserted into the path are percent-encoded segments, so only the
+/// step text decides where the request goes: a path on the actor's service, or
+/// an absolute URL written out in the step. The actor's credentials and
+/// headers go only to its own service's origin; anywhere else the request is
+/// sent without them (and without the scope's auth).
+///
+/// # Errors
+///
+/// Fails when the path is neither `/…` nor a literal `http(s)://` URL, or
+/// cannot be interpolated.
+fn raw_request(
+    w: &World,
+    actor: &Actor,
+    method: &str,
+    path: &str,
+    mut opts: RequestOpts,
+) -> Result<Request<'static>> {
+    let absolute = path.starts_with("http://") || path.starts_with("https://");
+    ensure!(
+        absolute || path.starts_with('/'),
+        "the path of a raw request must start with `/` (or be an absolute http(s):// URL written in the step)"
+    );
+
+    let url = w.interpolate_path(path)?;
+    if absolute && !same_origin(w, actor, &url) {
+        return Ok(Actor::anywhere()
+            .request(method, &url)
+            .opts(opts)
+            .auth(Auth::None));
+    }
+
+    // `.opts(..)` replaces the options, including the actor's service.
+    if opts.service.is_none() {
+        opts.service.clone_from(&actor.service);
+    }
+
+    Ok(actor.request(method, &url).opts(opts))
+}
+
+/// Whether `url` has the origin (scheme, host, port) of `actor`'s service.
+fn same_origin(w: &World, actor: &Actor, url: &str) -> bool {
+    let origin = |u: &str| reqwest::Url::parse(u).ok().map(|u| u.origin());
+    let service = w.cx().config().service_url(actor.service.as_deref()).ok();
+    match (origin(url), service.and_then(origin)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// The request options a request step's ` with…:` suffix and its table or
@@ -305,10 +362,10 @@ fn request_opts(w: &World, a: &StepArgs) -> Result<RequestOpts> {
         ),
         Some("with:") => fill_from_table(w, a.table()?, &mut opts)?,
         Some("with the JSON body:") => {
-            opts.json = Some(parse_json(&w.interpolate(a.docstring()?)?)?);
+            opts.json = Some(w.interpolate_json(a.docstring()?)?);
         }
         Some("with options:") => {
-            opts = serde_json::from_value(parse_json(&w.interpolate(a.docstring()?)?)?).context(
+            opts = serde_json::from_value(w.interpolate_json(a.docstring()?)?).context(
                 "invalid request options (same shape as in Rhai/JS: path, query, headers, json, form, body, …)",
             )?;
         }
@@ -335,14 +392,15 @@ fn fill_from_table(w: &World, rows: &[Vec<String>], opts: &mut RequestOpts) -> R
             continue;
         }
 
-        let value = w.interpolate(value)?;
         let target = match place.as_str() {
             "path" => &mut opts.path,
             "query" => &mut opts.query,
             "header" => &mut opts.headers,
             "form" => &mut form,
             "json" => {
-                let v = parse_json(&value).with_context(|| format!("json field '{name}'"))?;
+                let v = w
+                    .interpolate_json(value)
+                    .with_context(|| format!("json field '{name}'"))?;
                 json.insert(name.clone(), v);
                 continue;
             }
@@ -351,7 +409,7 @@ fn fill_from_table(w: &World, rows: &[Vec<String>], opts: &mut RequestOpts) -> R
                 i + 1
             ),
         };
-        target.insert(name.clone(), Value::String(value));
+        target.insert(name.clone(), Value::String(w.interpolate(value)?));
     }
 
     opts.form = (!form.is_empty()).then_some(form);
@@ -360,13 +418,6 @@ fn fill_from_table(w: &World, rows: &[Vec<String>], opts: &mut RequestOpts) -> R
     }
 
     Ok(())
-}
-
-/// Strict JSON: `"EUR"` is a string, `EUR` is an error, not a string. The
-/// error gives the position, not the text, which may hold a resolved secret.
-fn parse_json(text: &str) -> Result<Value> {
-    serde_json::from_str(text.trim())
-        .map_err(|e| anyhow!("not valid JSON ({e}); write strings in double quotes, e.g. \"EUR\""))
 }
 
 /// JSON equality where `4200` and `4200.0` are the same number.
@@ -426,10 +477,8 @@ mod tests {
     }
 
     #[test]
-    fn strict_json_values() {
-        assert_eq!(parse_json("\"EUR\"").unwrap(), Value::String("EUR".into()));
-        let e = parse_json("hunter2-secret").unwrap_err().to_string();
-        assert!(!e.contains("hunter2"), "{e}");
+    fn numbers_compare_by_value() {
         assert!(same(&serde_json::json!(4200), &serde_json::json!(4200.0)));
+        assert!(!same(&serde_json::json!("4200"), &serde_json::json!(4200)));
     }
 }

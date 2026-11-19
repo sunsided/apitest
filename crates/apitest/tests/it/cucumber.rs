@@ -2,8 +2,8 @@
 //! drift, tag selection, failures, cleanups, redaction, `within` and custom steps.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use apitest::SuiteReport;
 use apitest::cucumber::{FeatureOptions, Steps, load, load_str};
@@ -277,4 +277,89 @@ Feature: waiting
         .quiet(true);
     run_suite(&suite, &cfg).await.assert_passed();
     assert_eq!(calls.load(Ordering::SeqCst), 4);
+}
+
+/// What a recording server saw: the raw path, the `Authorization` header and the body.
+type Seen = Arc<Mutex<Vec<(String, Option<String>, String)>>>;
+
+/// A server that answers `/start` with `start` and records every other request.
+async fn recording_server(start: Value) -> (TestServer, Seen) {
+    use axum::http::{HeaderMap, Uri};
+
+    let seen = Seen::default();
+    let log = seen.clone();
+    let app = axum::Router::new()
+        .route(
+            "/start",
+            axum::routing::get(move || async move { axum::Json(start) }),
+        )
+        .fallback(move |uri: Uri, headers: HeaderMap, body: String| {
+            let auth = headers
+                .get("authorization")
+                .map(|v| v.to_str().unwrap().to_string());
+            log.lock()
+                .unwrap()
+                .push((uri.path().to_string(), auth, body));
+            async { axum::Json(json!({})) }
+        });
+
+    (TestServer::axum(app).await.unwrap(), seen)
+}
+
+/// Response values cannot restructure a JSON body or name a variable, and a URL
+/// from a response used in a path stays on the service: another host only sees
+/// requests the step text names, and never the actor's credentials.
+#[tokio::test(flavor = "multi_thread")]
+async fn response_values_cannot_restructure_or_redirect_requests() {
+    let (other, other_seen) = recording_server(json!({})).await;
+    let steal = format!("{}/steal", other.base_url());
+    let hostile = r#"", "x": 1, "p": "${API_PASS}"#;
+    let (svc, svc_seen) = recording_server(json!({ "next": steal, "v": hostile })).await;
+    let src = format!(
+        r#"
+Feature: hostile values
+  Background:
+    Given "u" is an actor on "svc" with the bearer token "tok-1234-secret"
+    When "u" sends GET "/start" expecting 200
+    And I remember the response at "/v" as "v"
+    And I remember the response at "/next" as "next"
+
+  Scenario: stays put
+    When "u" sends GET "/go/{{{{next}}}}" expecting 200
+    And "u" sends POST "/echo" expecting 200 with options:
+      """json
+      {{ "json": {{ "name": "{{{{v}}}}" }} }}
+      """
+    And "u" sends GET "{steal}" expecting 200
+
+  Scenario: no path
+    When "u" sends GET "{{{{next}}}}"
+"#
+    );
+    let cfg = RunConfig::new(svc.base_url())
+        .service("svc", svc.base_url())
+        .var("API_PASS", "secret")
+        .quiet(true);
+    let report = run_suite(&inline(&src), &cfg).await;
+    assert!(
+        matches!(report.tests[0].outcome, Outcome::Passed),
+        "{:?}",
+        report.tests[0].outcome
+    );
+    let Outcome::Failed { message, .. } = &report.tests[1].outcome else {
+        panic!("{:?}", report.tests[1].outcome);
+    };
+    assert!(message.contains("must start with `/`"), "{message}");
+
+    let svc_seen = svc_seen.lock().unwrap().clone();
+    let encoded = steal.replace(':', "%3A").replace('/', "%2F");
+    assert_eq!(svc_seen[0].0, format!("/go/{encoded}"));
+    assert_eq!(svc_seen[0].1.as_deref(), Some("Bearer tok-1234-secret"));
+    let body: Value = serde_json::from_str(&svc_seen[1].2).unwrap();
+    assert_eq!(body, json!({ "name": hostile }));
+
+    let other_seen = other_seen.lock().unwrap().clone();
+    assert_eq!(other_seen.len(), 1, "{other_seen:?}");
+    assert_eq!(other_seen[0].0, "/steal");
+    assert_eq!(other_seen[0].1, None, "credentials leaked to another host");
 }

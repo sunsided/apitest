@@ -994,7 +994,7 @@ fn parse_body(text: &str) -> Value {
 
 /// Percent-encodes everything except RFC 3986 unreserved characters, so the
 /// value stays a single path segment.
-fn encode_segment(s: &str) -> String {
+pub(crate) fn encode_segment(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
