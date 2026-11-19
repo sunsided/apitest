@@ -28,6 +28,7 @@ API testing and load testing in Rust, with:
 - [Lifecycle](#lifecycle)
 - [Writing tests](#writing-tests)
 - [Authentication](#authentication)
+  - [Variables, `.env` files and redaction](#variables-env-files-and-redaction)
 - [Tracing and headers](#tracing-and-headers)
 - [The same suite in four languages](#the-same-suite-in-four-languages)
   - [Rust suite](#rust-suite)
@@ -329,6 +330,62 @@ actors:
       token_url: https://idp.example.test/oauth/token
       client_id: reporting
       client_secret: "${REPORTING_SECRET}"
+```
+
+### Variables, `.env` files and redaction
+
+`${NAME}` works in every auth field and actor header, and `env("NAME")` / `cx.env("NAME")` read the same variables. A name is looked up in this order, highest first:
+
+1. `--var NAME=…` (`RunConfig::var`)
+2. the process environment
+3. `.env` files, a later file winning over an earlier one (`.env.local` over `.env`)
+4. `vars:` in `apitest.nova` (`RunConfig::var_default`), as defaults
+
+- **`.env` files** are parsed with [`dotenvy`](https://docs.rs/dotenvy) into the run's own variables; the process environment is never changed. Without `env_files:`, `.env` and `.env.local` next to `apitest.nova` are read if they exist. Files listed in `env_files:` (relative to `apitest.nova`) or passed with `--env-file` (repeatable, relative to the current directory, replacing the project's list) must exist. `--no-env-file` reads none. Errors name the file and a position, never its content. Keep `.env.local` out of git (this repository's [`.gitignore`](https://github.com/sunsided/apitest/blob/main/.gitignore) lists it); a dedicated test OAuth client's `client_id` and `client_secret` belong there or in CI secrets.
+- **Checked up front.** Every `${NAME}` in the configured actors must resolve before any test starts. All missing names are reported at once, with the fields that use them, and `apitest run` / `load` exit with code 2. There is no fallback value. A set-but-empty variable counts as set (an empty `FOO` in the environment hides `FOO` in `.env`), but an empty variable anywhere in an actor (auth fields and headers, also inside `"Bearer ${TOKEN}"`) is an error; write a literal `""` for an intentionally empty value. A non-UTF-8 environment value is an error, not a fall-through.
+- **Secrets are masked.** Passwords, client secrets, bearer tokens, API keys and header values of actors and `Auth`s, and every token a login or client-credentials grant returns, are replaced with `***` in `cx.log`, script `print` / `console.log`, errors and reports (console, JUnit, JSON). Values shorter than 4 characters are not masked, so that a one-letter test password does not garble every line.
+- **Redaction patterns** mask anything else that must never be printed: `redact:` in `apitest.nova` (see the [schema](https://github.com/sunsided/apitest/blob/main/crates/apitest/schemas/apitest-config.novs)) and `--redact` (repeatable) take regular expressions, and every match becomes `***`. An invalid pattern is a configuration error.
+- Actors stay templates: serialized or written anywhere, they keep `${SECRET}`, never the value, and nothing from `.env` reaches the lockfile.
+
+```text
+# apitest.nova
+vars:
+  REPORTING_CLIENT_ID: reporting-test   # default; .env, the environment or --var win
+env_files: [.env, .env.local]           # optional; the default list, but listed files must exist
+redact:
+  - "cust-[0-9]+"
+actors:
+  reporting:
+    service: reports
+    auth:
+      type: client_credentials
+      token_url: https://idp.example.test/oauth/token
+      client_id: "${REPORTING_CLIENT_ID}"
+      client_secret: "${REPORTING_CLIENT_SECRET}"
+```
+
+```bash
+# .env.local (not committed)
+REPORTING_CLIENT_SECRET=…
+```
+
+The same from Rust:
+
+```rust
+let cfg = RunConfig::new(base_url)
+    .var_default("REPORTING_CLIENT_ID", "reporting-test")
+    .env_file(".env")?
+    .env_file(".env.local")?
+    .redact_pattern("cust-[0-9]+")?
+    .actor(
+        "reporting",
+        "reports",
+        Auth::ClientCredentials(ClientCredentials::new(
+            token_url,
+            "${REPORTING_CLIENT_ID}",
+            "${REPORTING_CLIENT_SECRET}",
+        )),
+    );
 ```
 
 ## Tracing and headers
@@ -729,7 +786,8 @@ apitest call hub DELETE /users/7 --as hub_admin --expect 204 -v             # -v
 ```
 
 - **Bodies** are UTF-8 text: `--json`, `--data` (inline, `@file`, `@-` for stdin; `@@` starts a literal `@`) or `--form k=v`.
-- **Output.** The response body goes to stdout as received, so it pipes into `jq`. `-i` puts `HTTP <status>` and the response headers before it (a repeated header shows its last value). `-v` writes the request as sent and the response status to stderr, with cookies, `Authorization`, the header a login flow or API key uses, and the actor's configured `headers:` redacted. Errors go to stderr as [terminal diagnostics](#terminal-diagnostics). `--timeout` (default 30s, including a login) stops a hanging call.
+- **Variables and redaction** work as in `run` (see [Variables, `.env` files and redaction](#variables-env-files-and-redaction)): `.env` / `.env.local` next to `apitest.nova` (or `--env-file`, `--no-env-file`), `--var`, and `redact:` / `--redact`. Only the actor in `--as` must have all its variables; another actor's missing secret doesn't block a one-off call.
+- **Output.** The response body goes to stdout, so it pipes into `jq`. Known secrets and redaction patterns are masked as `***` there too (in the body and, with `-i`, the headers), so a token endpoint's answer doesn't end up in a terminal or CI log. `-i` puts `HTTP <status>` and the response headers before it (a repeated header shows its last value). `-v` writes the request as sent and the response status to stderr, with cookies, `Authorization`, the header a login flow or API key uses, and the actor's configured `headers:` redacted. Errors go to stderr as [terminal diagnostics](#terminal-diagnostics). `--timeout` (default 30s, including a login) stops a hanging call.
 - **Exit codes.** 0 for a 2xx status (or the `--expect` status), 1 for any other status, 2 for usage, config, auth or connection errors.
 - **Nothing is guessed, especially not auth.** The service must be listed under `services:` (`base_url` is not a fallback), and the path, like a login flow's `path`, must start with `/`, so credentials can't be sent to another host. Without `--as`, the request carries no credentials. An actor that logs in needs a login flow with a `path` under `auth:`, because there is no spec to find a `login` operation in. If it's missing, the call fails before sending anything:
 
@@ -781,7 +839,7 @@ cd crates/apitest-py && maturin develop && pytest -v
 |---|---|
 | `cargo test -p apitest --features full --test scenarios` | drift (compatible/breaking/in-process doc), runtime validation, cleanup after failure/panic/timeout, serial vs parallel vs resources, lockfile, JUnit, Rhai/JS suites, Rust and JS load (ramping) |
 | `cargo test -p apitest --features full --test billing_harness` | the libtest harness with Rust, Rhai and JS suites against an in-process axum app |
-| `cargo test -p apitest --features full --test headers` | trace formats and correlation, opt-out at every level, parent traces, User-Agent precedence, all auth kinds, single-flight cached logins with 401 re-login, client-credentials expiry, named actors from Rust, JS and Rhai |
+| `cargo test -p apitest --features full --test headers` | trace formats and correlation, opt-out at every level, parent traces, User-Agent precedence, all auth kinds, single-flight cached logins with 401 re-login, client-credentials expiry, named actors from Rust, JS and Rhai, `.env` files, up-front variable checks and masked secrets |
 | `cargo test -p apitest --features full --test it diagnostics` | miette cause chains in `render_terminal`, plain text in `render`, JUnit, JSON and `assert_passed` |
 | `cargo test -p apitest --features full --test care_flow` | the multi-actor, multi-service onboarding flow (Hub, App, mail mock) with step reports, rollback and a `finally` leftover check |
 | `cargo test -p apitest --features full --test macro_harness` | the same suite via `#[apitest::test]` / `#[apitest::fixture]` / `#[apitest::suite]` (`DEMO_VARIANT=2.0` shows drift) |
