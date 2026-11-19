@@ -1,9 +1,12 @@
 //! `apitest` command-line runner.
 //!
 //! Exit codes: `0` when everything passed, `1` when a test, threshold or
-//! contract check failed, `2` when the run itself could not be carried out.
+//! contract check failed (or `apitest call` got an unexpected status), `2` when
+//! the run itself could not be carried out.
 
 #![forbid(unsafe_code)]
+
+mod call;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -43,9 +46,6 @@ struct Common {
     /// Base URL for relative request paths.
     #[arg(long, short = 'u')]
     base_url: Option<String>,
-    /// Variable for `cx.env()`, e.g. --var `API_USER=demo` (repeatable).
-    #[arg(long = "var", value_parser = parse_kv)]
-    vars: Vec<(String, String)>,
     /// Lockfile path (default from config, else apitest.lock.nova next to the config).
     #[arg(long)]
     lockfile: Option<PathBuf>,
@@ -55,7 +55,18 @@ struct Common {
     /// Suppress `cx.log()` output.
     #[arg(long, short = 'q')]
     quiet: bool,
-    /// User-Agent for every request (default: `apitest/<version>`).
+    /// Variables, User-Agent and tracing.
+    #[command(flatten)]
+    request: RequestFlags,
+}
+
+/// Request-level options shared by every subcommand that sends requests.
+#[derive(Args, Clone)]
+struct RequestFlags {
+    /// Variable for `cx.env()` and `${NAME}` in the config, e.g. --var `API_USER=demo` (repeatable).
+    #[arg(long = "var", value_parser = parse_kv)]
+    vars: Vec<(String, String)>,
+    /// User-Agent for every request (default: from the config, else `apitest/<version>`).
     #[arg(long)]
     user_agent: Option<String>,
     /// Do not send trace-context headers.
@@ -66,6 +77,34 @@ struct Common {
     trace_format: Vec<String>,
 }
 
+impl RequestFlags {
+    /// Layers the flags over `cfg`: vars are added, the rest replace the config.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unknown `--trace-format`.
+    fn apply(&self, cfg: &mut RunConfig) -> Result<()> {
+        cfg.vars.extend(self.vars.iter().cloned());
+        if let Some(ua) = &self.user_agent {
+            cfg.user_agent.clone_from(ua);
+        }
+
+        if self.no_trace {
+            cfg.tracing.enabled = false;
+        }
+
+        if !self.trace_format.is_empty() {
+            cfg.tracing.formats = self
+                .trace_format
+                .iter()
+                .map(|f| f.parse())
+                .collect::<Result<_>>()?;
+        }
+
+        Ok(())
+    }
+}
+
 /// Subcommands.
 #[derive(Subcommand)]
 enum Cmd {
@@ -73,6 +112,11 @@ enum Cmd {
     Run(RunArgs),
     /// Run one test of a suite as a load scenario.
     Load(LoadArgs),
+    /// Send one request to a configured service, no `OpenAPI` spec needed.
+    ///
+    /// Prints the response body to stdout. Exits 0 for a 2xx status (or the
+    /// --expect status), 1 for any other status, 2 for errors.
+    Call(call::Args),
     /// Contract operations.
     Contract {
         /// The contract operation to run.
@@ -224,24 +268,9 @@ fn run_config(common: &Common, project: Option<&ProjectConfig>) -> Result<RunCon
         cfg.lockfile = Some(l.clone());
     }
 
-    cfg.vars.extend(common.vars.iter().cloned());
     cfg.check_drift = !common.no_drift_check;
     cfg.quiet = common.quiet;
-    if let Some(ua) = &common.user_agent {
-        cfg.user_agent.clone_from(ua);
-    }
-
-    if common.no_trace {
-        cfg.tracing.enabled = false;
-    }
-
-    if !common.trace_format.is_empty() {
-        cfg.tracing.formats = common
-            .trace_format
-            .iter()
-            .map(|f| f.parse())
-            .collect::<Result<_>>()?;
-    }
+    common.request.apply(&mut cfg)?;
 
     Ok(cfg)
 }
@@ -273,6 +302,7 @@ async fn run(cli: Cli) -> Result<bool> {
     match cli.cmd {
         Cmd::Run(args) => run_tests(args).await,
         Cmd::Load(args) => run_load_test(args).await,
+        Cmd::Call(args) => call::call(args).await,
         Cmd::Contract {
             cmd: ContractCmd::Check { files, common },
         } => contract_check(&files, &common).await,

@@ -41,6 +41,7 @@ API testing and load testing in Rust, with:
   - [nextest](#nextest)
 - [CLI](#cli)
   - [Terminal diagnostics](#terminal-diagnostics)
+  - [One-off requests: `apitest call`](#one-off-requests-apitest-call)
 - [Load testing](#load-testing)
 - [Python bindings](#python-bindings)
 - [Tests](#tests)
@@ -675,6 +676,38 @@ With the `diagnostics` feature (part of `full`, and always on in the CLI), `Suit
 ```
 
 The CLI uses it for suite output and for its own errors. Colour is only used on a terminal, and `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE` and `TERM=dumb` are respected (`apitest::diagnostic::use_color`). `render`, JUnit, JSON, `assert_passed` and the libtest harness messages stay plain text, because CI and IDE tooling parses them. The cause chain is kept on `Outcome::Failed` and `SuiteReport::setup_chain`, but it is not serialized.
+
+### One-off requests: `apitest call`
+
+`apitest call <service> <method> <path>` sends a single request without a suite or an OpenAPI spec. It reads the same `apitest.nova`, so services, named actors, vars, the User-Agent and tracing all apply.
+
+```bash
+apitest call hub GET /users/me --as hub_admin \
+  --var HUB_ADMIN_EMAIL=admin@hub.test --var HUB_ADMIN_PASSWORD=...
+apitest call hub POST /users --as hub_admin --json '{"email":"a@b.test"}'    # or --json @user.json / @- for stdin
+apitest call hub PUT /notes/7 --data @note.md -H 'Content-Type: text/markdown'
+apitest call mail GET /messages --query to=a@b.test -i                      # -i: status code and headers first
+apitest call hub DELETE /users/7 --as hub_admin --expect 204 -v             # -v: request/response summary on stderr
+```
+
+- **Bodies** are UTF-8 text: `--json`, `--data` (inline, `@file`, `@-` for stdin; `@@` starts a literal `@`) or `--form k=v`.
+- **Output.** The response body goes to stdout as received, so it pipes into `jq`. `-i` puts `HTTP <status>` and the response headers before it (a repeated header shows its last value). `-v` writes the request as sent and the response status to stderr, with cookies, `Authorization`, the header a login flow or API key uses, and the actor's configured `headers:` redacted. Errors go to stderr as [terminal diagnostics](#terminal-diagnostics). `--timeout` (default 30s, including a login) stops a hanging call.
+- **Exit codes.** 0 for a 2xx status (or the `--expect` status), 1 for any other status, 2 for usage, config, auth or connection errors.
+- **Nothing is guessed, especially not auth.** The service must be listed under `services:` (`base_url` is not a fallback), and the path, like a login flow's `path`, must start with `/`, so credentials can't be sent to another host. Without `--as`, the request carries no credentials. An actor that logs in needs a login flow with a `path` under `auth:`, because there is no spec to find a `login` operation in. If it's missing, the call fails before sending anything:
+
+  ```text
+    × actor 'hub_admin' logs in as '${HUB_ADMIN_EMAIL}' on 'hub', but there is no login flow for 'hub'
+    │ help: `apitest call` has no OpenAPI spec and doesn't guess a login endpoint; configure it in apitest.nova, e.g.
+    │   auth:
+    │     hub:
+    │       path: /login
+    │       body:
+    │         username: "{username}"
+    │         password: "{password}"
+    │       token: /token
+  ```
+
+- **Actors stay intact.** An actor must belong to the service it's sent to, and a `-H` for a header the actor sets (its credentials, `headers:` or `user_agent:`) is refused instead of silently replacing the actor's value.
 
 ## Load testing
 
