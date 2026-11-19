@@ -21,6 +21,29 @@ API testing and load testing in Rust, with:
 - **Standard reports.** JUnit XML (GitHub, GitLab, Jenkins, IDEs) and JSON. Contract drift and suite setup/teardown failures show up as their own test cases.
 - **NOVA for config.** `apitest.nova` (project config) and `apitest.lock.nova` use [NOVA](https://novafile.dev/), with schemas in [`crates/apitest/schemas/`](https://github.com/sunsided/apitest/tree/main/crates/apitest/schemas) (`apitest-config.novs`, `apitest-lock.novs`). Both files are validated against them on load, with every issue reported by path. OpenAPI documents stay YAML/JSON because that's their standard format.
 
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+
+- [Layout](#layout)
+- [Lifecycle](#lifecycle)
+- [Writing tests](#writing-tests)
+- [Authentication](#authentication)
+- [Tracing and headers](#tracing-and-headers)
+- [The same suite in four languages](#the-same-suite-in-four-languages)
+- [Contract pinning](#contract-pinning)
+- [Using it as a library (axum example)](#using-it-as-a-library-axum-example)
+  - [Native-feeling Rust tests: attribute macros](#native-feeling-rust-tests-attribute-macros)
+  - [nextest](#nextest)
+- [CLI](#cli)
+- [Load testing](#load-testing)
+- [Python](#python)
+- [Tests](#tests)
+- [npm](#npm)
+- [Open questions / next steps](#open-questions--next-steps)
+- [License](#license)
+
+<!-- END doctoc -->
+
 ## Layout
 
 Four crates: the library, its proc macros, the CLI and the Python bindings. Library users don't pull in CLI dependencies. The npm package (`npm/`) wraps the CLI binary.
