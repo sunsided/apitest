@@ -6,29 +6,45 @@ use serde::Serialize;
 
 use crate::contract::{DriftReport, Severity};
 
+/// How a test ended. Serialized as `{"status": "passed" | "failed" | "skipped", ...}`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum Outcome {
+    /// The body (and its setup) succeeded. Cleanup failures are tracked separately.
     Passed,
-    Failed { message: String },
-    Skipped { reason: String },
+    /// Setup, the body or a `before_each` hook failed.
+    Failed {
+        /// The error chain, possibly spanning several lines.
+        message: String,
+    },
+    /// The test never ran, e.g. because suite setup or the drift check failed.
+    Skipped {
+        /// Why the test was skipped.
+        reason: String,
+    },
 }
 
 /// A named step inside a test (see [`crate::dsl::step`]).
 #[derive(Debug, Clone, Serialize)]
 pub struct StepReport {
+    /// Step name as given in the test.
     pub name: String,
+    /// Wall-clock duration of the step in milliseconds.
     pub duration_ms: f64,
     /// `None` if the step succeeded.
     pub error: Option<String>,
 }
 
+/// Result of one functional test.
 #[derive(Debug, Clone, Serialize)]
 pub struct TestReport {
+    /// Test name inside its suite.
     pub name: String,
     /// Harness id (see [`crate::suite::TestCase::id`]).
     pub id: String,
+    /// How the test ended.
     pub outcome: Outcome,
+    /// Wall-clock duration in milliseconds, including setup and cleanup.
     pub duration_ms: f64,
     /// Cleanup failures. A test with failed cleanups counts as failed.
     pub teardown_errors: Vec<String>,
@@ -54,25 +70,33 @@ impl TestReport {
             .join("\n")
     }
 
+    /// `true` if the test passed and all its cleanups succeeded.
     #[must_use]
     pub fn passed(&self) -> bool {
         self.outcome == Outcome::Passed && self.teardown_errors.is_empty()
     }
 }
 
+/// Result of one suite run.
 #[derive(Debug, Clone, Serialize)]
 pub struct SuiteReport {
+    /// Suite name.
     pub suite: String,
+    /// One report per selected test, in declaration order.
     pub tests: Vec<TestReport>,
     /// Suite-level setup failure (drift, suite fixture, `before_all`).
     pub setup_error: Option<String>,
     /// Suite-level teardown failures (`after_all`, suite/vu cleanups).
     pub teardown_errors: Vec<String>,
+    /// Drift-check results, one per contract with a live spec.
     pub drift: Vec<DriftReport>,
+    /// Wall-clock duration of the whole suite in milliseconds.
     pub duration_ms: f64,
 }
 
 impl SuiteReport {
+    /// `true` if suite setup and teardown succeeded and every test passed.
+    #[must_use]
     pub fn passed(&self) -> bool {
         self.setup_error.is_none()
             && self.teardown_errors.is_empty()
@@ -80,6 +104,11 @@ impl SuiteReport {
     }
 
     /// Panics with a readable summary unless everything passed. Handy in `#[tokio::test]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`SuiteReport::render`] as the message if [`SuiteReport::passed`]
+    /// is `false`.
     #[track_caller]
     pub fn assert_passed(&self) {
         assert!(
@@ -90,6 +119,8 @@ impl SuiteReport {
         );
     }
 
+    /// `(passed, failed, skipped)` test counts. Passed tests with failed cleanups
+    /// count as failed.
     #[must_use]
     pub fn counts(&self) -> (usize, usize, usize) {
         let mut c = (0, 0, 0);
@@ -100,6 +131,7 @@ impl SuiteReport {
                 _ => c.1 += 1,
             }
         }
+
         c
     }
 
@@ -109,57 +141,21 @@ impl SuiteReport {
         let mut s = String::new();
         let _ = writeln!(s, "suite {}", self.suite);
         for d in &self.drift {
-            let verdict = if d.is_breaking() {
-                "BREAKING"
-            } else {
-                "compatible"
-            };
-            let _ = writeln!(
-                s,
-                "  contract {}: pinned v{} vs live v{} ({}) → {verdict}  [{}]",
-                d.contract, d.pinned_version, d.live_version, d.source, d.scope
-            );
-            for f in &d.findings {
-                let tag = match f.severity {
-                    Severity::Breaking => "✗ breaking",
-                    Severity::Warning => "! warning ",
-                    Severity::Info => "· info    ",
-                };
-                let _ = writeln!(
-                    s,
-                    "    {tag} {} @ {}: {}",
-                    f.operation, f.location, f.message
-                );
-            }
+            render_drift(&mut s, d);
         }
+
         if let Some(e) = &self.setup_error {
             let _ = writeln!(s, "  ✗ setup failed: {e}");
         }
+
         for t in &self.tests {
-            let (mark, inline, failure) = match &t.outcome {
-                Outcome::Passed if t.teardown_errors.is_empty() => ("✓", String::new(), None),
-                Outcome::Passed => ("✗", " (cleanup failed)".into(), None),
-                Outcome::Failed { message } => ("✗", String::new(), Some(message)),
-                Outcome::Skipped { reason } => ("-", format!(" (skipped: {reason})"), None),
-            };
-            let _ = writeln!(s, "  {mark} {} [{:.0} ms]{inline}", t.name, t.duration_ms);
-            // For failures, the steps tell the story before the error.
-            if !t.passed() {
-                for st in &t.steps {
-                    let m = if st.error.is_none() { "✓" } else { "✗" };
-                    let _ = writeln!(s, "      {m} {} [{:.0} ms]", st.name, st.duration_ms);
-                }
-            }
-            if let Some(msg) = failure {
-                let _ = writeln!(s, "      {}", msg.replace('\n', "\n      "));
-            }
-            for e in &t.teardown_errors {
-                let _ = writeln!(s, "      cleanup: {e}");
-            }
+            render_test(&mut s, t);
         }
+
         for e in &self.teardown_errors {
             let _ = writeln!(s, "  ✗ teardown: {e}");
         }
+
         let (p, f, sk) = self.counts();
         let _ = writeln!(
             s,
@@ -171,6 +167,110 @@ impl SuiteReport {
     }
 }
 
+/// Appends a contract's drift verdict and all its findings to `s`.
+fn render_drift(s: &mut String, d: &DriftReport) {
+    let verdict = if d.is_breaking() {
+        "BREAKING"
+    } else {
+        "compatible"
+    };
+    let _ = writeln!(
+        s,
+        "  contract {}: pinned v{} vs live v{} ({}) → {verdict}  [{}]",
+        d.contract, d.pinned_version, d.live_version, d.source, d.scope
+    );
+    for f in &d.findings {
+        let tag = match f.severity {
+            Severity::Breaking => "✗ breaking",
+            Severity::Warning => "! warning ",
+            Severity::Info => "· info    ",
+        };
+        let _ = writeln!(
+            s,
+            "    {tag} {} @ {}: {}",
+            f.operation, f.location, f.message
+        );
+    }
+}
+
+/// Appends a test's status line, and for failures its steps, error and cleanup errors.
+fn render_test(s: &mut String, t: &TestReport) {
+    let (mark, inline, failure) = match &t.outcome {
+        Outcome::Passed if t.teardown_errors.is_empty() => ("✓", String::new(), None),
+        Outcome::Passed => ("✗", " (cleanup failed)".into(), None),
+        Outcome::Failed { message } => ("✗", String::new(), Some(message)),
+        Outcome::Skipped { reason } => ("-", format!(" (skipped: {reason})"), None),
+    };
+    let _ = writeln!(s, "  {mark} {} [{:.0} ms]{inline}", t.name, t.duration_ms);
+    // For failures, the steps tell the story before the error.
+    if !t.passed() {
+        for st in &t.steps {
+            let m = if st.error.is_none() { "✓" } else { "✗" };
+            let _ = writeln!(s, "      {m} {} [{:.0} ms]", st.name, st.duration_ms);
+        }
+    }
+
+    if let Some(msg) = failure {
+        let _ = writeln!(s, "      {}", msg.replace('\n', "\n      "));
+    }
+
+    for e in &t.teardown_errors {
+        let _ = writeln!(s, "      cleanup: {e}");
+    }
+}
+
+/// The `<testcase>` elements of one suite plus their per-kind counts.
+struct SuiteCases<'a> {
+    /// The suite the cases belong to.
+    suite: &'a SuiteReport,
+    /// Rendered `<testcase>` elements, each ending in a newline.
+    cases: Vec<String>,
+    /// Cases containing a `<failure>`.
+    failures: usize,
+    /// Cases containing an `<error>`.
+    errors: usize,
+    /// Cases containing a `<skipped>`.
+    skipped: usize,
+}
+
+impl<'a> SuiteCases<'a> {
+    /// Renders all cases of `suite`: drift checks, setup, tests, teardown.
+    fn new(suite: &'a SuiteReport) -> Self {
+        let mut cases: Vec<String> = suite
+            .drift
+            .iter()
+            .map(|d| contract_case(&suite.suite, d))
+            .collect();
+        if let Some(e) = &suite.setup_error {
+            cases.push(format!(
+                "    <testcase classname=\"{0}\" name=\"[setup]\" time=\"0\">\n      <error type=\"SetupError\" message=\"suite setup failed\">{1}</error>\n    </testcase>\n",
+                esc(&suite.suite),
+                esc(e)
+            ));
+        }
+
+        cases.extend(suite.tests.iter().map(|t| test_case(&suite.suite, t)));
+        if !suite.teardown_errors.is_empty() {
+            cases.push(format!(
+                "    <testcase classname=\"{0}\" name=\"[teardown]\" time=\"0\">\n      <error type=\"TeardownError\" message=\"suite teardown failed\">{1}</error>\n    </testcase>\n",
+                esc(&suite.suite),
+                esc(&suite.teardown_errors.join("\n"))
+            ));
+        }
+
+        let count = |tag: &str| cases.iter().filter(|c| c.contains(tag)).count();
+        let (failures, errors, skipped) = (count("<failure"), count("<error"), count("<skipped"));
+
+        SuiteCases {
+            suite,
+            cases,
+            failures,
+            errors,
+            skipped,
+        }
+    }
+}
+
 /// Renders suites as a `JUnit` XML document (`<testsuites>`), the de-facto standard
 /// understood by GitHub Actions, GitLab, Jenkins, Azure DevOps, IDEs, ...
 ///
@@ -179,154 +279,147 @@ impl SuiteReport {
 /// up in CI dashboards like any other failure.
 #[must_use]
 pub fn junit_xml(suites: &[SuiteReport]) -> String {
+    let all: Vec<SuiteCases> = suites.iter().map(SuiteCases::new).collect();
+    let total = |f: fn(&SuiteCases) -> usize| all.iter().map(f).sum::<usize>();
+
     let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    let mut all_cases = vec![];
-    for s in suites {
-        let mut cases: Vec<String> = vec![];
-        for d in &s.drift {
-            let mut c = format!(
-                "    <testcase classname=\"{}\" name=\"[contract] {}\" time=\"0\">\n",
-                esc(&s.suite),
-                esc(&d.contract)
-            );
-            if d.is_breaking() {
-                let body: Vec<String> = d
-                    .findings
-                    .iter()
-                    .filter(|f| f.severity == Severity::Breaking)
-                    .map(|f| format!("{} @ {}: {}", f.operation, f.location, f.message))
-                    .collect();
-                let _ = writeln!(
-                    c,
-                    "      <failure type=\"ContractDrift\" message=\"live spec v{} is incompatible with pinned v{}\">{}</failure>",
-                    esc(&d.live_version),
-                    esc(&d.pinned_version),
-                    esc(&body.join("\n"))
-                );
-            }
-            let other: Vec<String> = d
-                .findings
-                .iter()
-                .filter(|f| f.severity != Severity::Breaking)
-                .map(|f| {
-                    format!(
-                        "{:?} {} @ {}: {}",
-                        f.severity, f.operation, f.location, f.message
-                    )
-                })
-                .collect();
-            if !other.is_empty() {
-                let _ = writeln!(
-                    c,
-                    "      <system-out>{}</system-out>",
-                    esc(&other.join("\n"))
-                );
-            }
-            c.push_str("    </testcase>\n");
-            cases.push(c);
-        }
-        if let Some(e) = &s.setup_error {
-            cases.push(format!(
-                "    <testcase classname=\"{0}\" name=\"[setup]\" time=\"0\">\n      <error type=\"SetupError\" message=\"suite setup failed\">{1}</error>\n    </testcase>\n",
-                esc(&s.suite),
-                esc(e)
-            ));
-        }
-        for t in &s.tests {
-            let mut c = format!(
-                "    <testcase classname=\"{}\" name=\"{}\" time=\"{:.3}\">\n",
-                esc(&s.suite),
-                esc(&t.name),
-                t.duration_ms / 1000.0
-            );
-            if !t.steps.is_empty() {
-                let lines: Vec<String> = t
-                    .steps
-                    .iter()
-                    .map(|st| match &st.error {
-                        None => format!("✓ {} ({:.0} ms)", st.name, st.duration_ms),
-                        Some(e) => format!("✗ {} ({:.0} ms): {e}", st.name, st.duration_ms),
-                    })
-                    .collect();
-                let _ = writeln!(
-                    c,
-                    "      <system-out>{}</system-out>",
-                    esc(&lines.join("\n"))
-                );
-            }
-            match &t.outcome {
-                Outcome::Passed => {}
-                Outcome::Failed { message } => {
-                    let first = message.lines().next().unwrap_or_default();
-                    let _ = writeln!(
-                        c,
-                        "      <failure type=\"TestFailure\" message=\"{}\">{}</failure>",
-                        esc(first),
-                        esc(message)
-                    );
-                }
-                Outcome::Skipped { reason } => {
-                    let _ = writeln!(c, "      <skipped message=\"{}\"/>", esc(reason));
-                }
-            }
-            if !t.teardown_errors.is_empty() {
-                if t.outcome == Outcome::Passed {
-                    let _ = writeln!(
-                        c,
-                        "      <error type=\"TeardownError\" message=\"cleanup failed\">{}</error>",
-                        esc(&t.teardown_errors.join("\n"))
-                    );
-                } else {
-                    let _ = writeln!(
-                        c,
-                        "      <system-err>{}</system-err>",
-                        esc(&t.teardown_errors.join("\n"))
-                    );
-                }
-            }
-            c.push_str("    </testcase>\n");
-            cases.push(c);
-        }
-        if !s.teardown_errors.is_empty() {
-            cases.push(format!(
-                "    <testcase classname=\"{0}\" name=\"[teardown]\" time=\"0\">\n      <error type=\"TeardownError\" message=\"suite teardown failed\">{1}</error>\n    </testcase>\n",
-                esc(&s.suite),
-                esc(&s.teardown_errors.join("\n"))
-            ));
-        }
-        let failures = cases.iter().filter(|c| c.contains("<failure")).count();
-        let errors = cases.iter().filter(|c| c.contains("<error")).count();
-        let skipped = cases.iter().filter(|c| c.contains("<skipped")).count();
-        all_cases.push((s, cases, failures, errors, skipped));
-    }
-    type Row<'a> = (&'a SuiteReport, Vec<String>, usize, usize, usize);
-    let tot = |f: fn(&Row) -> usize| all_cases.iter().map(f).sum::<usize>();
     let _ = writeln!(
         x,
         "<testsuites name=\"apitest\" tests=\"{}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\" time=\"{:.3}\">",
-        tot(|c| c.1.len()),
-        tot(|c| c.2),
-        tot(|c| c.3),
-        tot(|c| c.4),
+        total(|c| c.cases.len()),
+        total(|c| c.failures),
+        total(|c| c.errors),
+        total(|c| c.skipped),
         suites.iter().map(|s| s.duration_ms).sum::<f64>() / 1000.0
     );
-    for (s, cases, failures, errors, skipped) in &all_cases {
+    for c in &all {
         let _ = writeln!(
             x,
-            "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{failures}\" errors=\"{errors}\" skipped=\"{skipped}\" time=\"{:.3}\">",
-            esc(&s.suite),
-            cases.len(),
-            s.duration_ms / 1000.0
+            "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\" time=\"{:.3}\">",
+            esc(&c.suite.suite),
+            c.cases.len(),
+            c.failures,
+            c.errors,
+            c.skipped,
+            c.suite.duration_ms / 1000.0
         );
-        for c in cases {
-            x.push_str(c);
+        for case in &c.cases {
+            x.push_str(case);
         }
+
         x.push_str("  </testsuite>\n");
     }
+
     x.push_str("</testsuites>\n");
     x
 }
 
+/// The `[contract] <name>` case: a `<failure>` listing breaking findings if the
+/// drift is breaking, other findings as `<system-out>`.
+fn contract_case(suite: &str, d: &DriftReport) -> String {
+    let mut c = format!(
+        "    <testcase classname=\"{}\" name=\"[contract] {}\" time=\"0\">\n",
+        esc(suite),
+        esc(&d.contract)
+    );
+    if d.is_breaking() {
+        let body: Vec<String> = d
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Breaking)
+            .map(|f| format!("{} @ {}: {}", f.operation, f.location, f.message))
+            .collect();
+        let _ = writeln!(
+            c,
+            "      <failure type=\"ContractDrift\" message=\"live spec v{} is incompatible with pinned v{}\">{}</failure>",
+            esc(&d.live_version),
+            esc(&d.pinned_version),
+            esc(&body.join("\n"))
+        );
+    }
+
+    let other: Vec<String> = d
+        .findings
+        .iter()
+        .filter(|f| f.severity != Severity::Breaking)
+        .map(|f| {
+            format!(
+                "{:?} {} @ {}: {}",
+                f.severity, f.operation, f.location, f.message
+            )
+        })
+        .collect();
+    if !other.is_empty() {
+        let _ = writeln!(
+            c,
+            "      <system-out>{}</system-out>",
+            esc(&other.join("\n"))
+        );
+    }
+
+    c.push_str("    </testcase>\n");
+    c
+}
+
+/// The case of one test: steps as `<system-out>`, then its outcome, then cleanup errors
+/// (an `<error>` for otherwise passed tests, `<system-err>` otherwise).
+fn test_case(suite: &str, t: &TestReport) -> String {
+    let mut c = format!(
+        "    <testcase classname=\"{}\" name=\"{}\" time=\"{:.3}\">\n",
+        esc(suite),
+        esc(&t.name),
+        t.duration_ms / 1000.0
+    );
+    if !t.steps.is_empty() {
+        let lines: Vec<String> = t
+            .steps
+            .iter()
+            .map(|st| match &st.error {
+                None => format!("✓ {} ({:.0} ms)", st.name, st.duration_ms),
+                Some(e) => format!("✗ {} ({:.0} ms): {e}", st.name, st.duration_ms),
+            })
+            .collect();
+        let _ = writeln!(
+            c,
+            "      <system-out>{}</system-out>",
+            esc(&lines.join("\n"))
+        );
+    }
+
+    match &t.outcome {
+        Outcome::Passed => {}
+        Outcome::Failed { message } => {
+            let first = message.lines().next().unwrap_or_default();
+            let _ = writeln!(
+                c,
+                "      <failure type=\"TestFailure\" message=\"{}\">{}</failure>",
+                esc(first),
+                esc(message)
+            );
+        }
+        Outcome::Skipped { reason } => {
+            let _ = writeln!(c, "      <skipped message=\"{}\"/>", esc(reason));
+        }
+    }
+
+    if !t.teardown_errors.is_empty() {
+        let errors = esc(&t.teardown_errors.join("\n"));
+        if t.outcome == Outcome::Passed {
+            let _ = writeln!(
+                c,
+                "      <error type=\"TeardownError\" message=\"cleanup failed\">{errors}</error>"
+            );
+        } else {
+            let _ = writeln!(c, "      <system-err>{errors}</system-err>");
+        }
+    }
+
+    c.push_str("    </testcase>\n");
+    c
+}
+
+/// Escapes `s` for XML text and attribute values, dropping control characters
+/// XML 1.0 forbids (everything below U+0020 except tab, newline and carriage return).
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -341,5 +434,6 @@ fn esc(s: &str) -> String {
             c => o.push(c),
         }
     }
+
     o
 }

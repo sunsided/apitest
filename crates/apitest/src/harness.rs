@@ -43,27 +43,36 @@
 //!   itself, because nextest only runs the tests it listed.
 
 use std::any::Any;
+use std::fmt::Write as _;
 use std::future::Future;
 
 use anyhow::Result;
 use libtest_mimic::{Arguments, Failed, Trial};
+use tokio::runtime::Runtime;
 
-use crate::report::{Outcome, SuiteReport, junit_xml};
+use crate::contract::DriftReport;
+use crate::report::{Outcome, SuiteReport, TestReport, junit_xml};
 use crate::runner::{RunConfig, run_suite};
 use crate::suite::Suite;
 
 /// What to run, plus resources (servers, temp dirs, ...) to keep alive meanwhile.
 pub struct Plan {
+    /// Settings for every suite of the plan.
     pub config: RunConfig,
+    /// Suites, run one after another in this order.
     pub suites: Vec<Suite>,
+    /// Values dropped only after all suites and `finally` checks finished.
     keep: Vec<Box<dyn Any + Send>>,
+    /// Named checks run after all suites, in registration order.
     finally: Vec<(String, Finally)>,
 }
 
+/// A deferred async check registered with [`Plan::finally`].
 type Finally =
     Box<dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>;
 
 impl Plan {
+    /// An empty plan using `config` for every suite.
     #[must_use]
     pub fn new(config: RunConfig) -> Self {
         Plan {
@@ -74,12 +83,15 @@ impl Plan {
         }
     }
 
+    /// Appends a suite.
     #[must_use]
     pub fn suite(mut self, s: Suite) -> Self {
         self.suites.push(s);
         self
     }
 
+    /// Appends several suites.
+    #[must_use]
     pub fn suites(mut self, s: impl IntoIterator<Item = Suite>) -> Self {
         self.suites.extend(s);
         self
@@ -87,6 +99,11 @@ impl Plan {
 
     /// Adds every suite registered with `#[apitest::test]`, `#[apitest::fixture]`
     /// and `#[apitest::suite]` in this test binary.
+    ///
+    /// # Errors
+    ///
+    /// Fails if two `#[apitest::suite]` declarations share a suite key, or a suite
+    /// builder returns an error.
     #[cfg(feature = "macros")]
     pub fn registered(mut self) -> Result<Self> {
         self.suites.extend(crate::registry::collect()?);
@@ -95,6 +112,9 @@ impl Plan {
 
     /// A check that runs after all suites (and all their teardowns) finished, e.g.
     /// "the services contain no leftover test data". Reported as `apitest::[finally] <name>`.
+    ///
+    /// Skipped under nextest, where each process only runs part of the suites.
+    #[must_use]
     pub fn finally<F, Fut>(mut self, name: &str, f: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -106,12 +126,14 @@ impl Plan {
     }
 
     /// Keeps a value (e.g. a [`crate::TestServer`]) alive until all suites finished.
+    #[must_use]
     pub fn keep(mut self, v: impl Any + Send) -> Self {
         self.keep.push(Box::new(v));
         self
     }
 }
 
+/// Whether the libtest filter and `--skip` arguments select the test `name`.
 fn selected(args: &Arguments, name: &str) -> bool {
     let matches = |pat: &str| {
         if args.exact {
@@ -123,6 +145,7 @@ fn selected(args: &Arguments, name: &str) -> bool {
     if args.skip.iter().any(|s| matches(s)) {
         return false;
     }
+
     match &args.filter {
         Some(f) => matches(f),
         None => true,
@@ -130,6 +153,14 @@ fn selected(args: &Arguments, name: &str) -> bool {
 }
 
 /// Entry point for a `harness = false` test target. Never returns.
+///
+/// Builds a multi-threaded tokio runtime, awaits `setup` for the [`Plan`], runs the
+/// selected tests and exits the process with libtest's exit code. A failing `setup`
+/// is reported as the single test `apitest::[harness setup]`.
+///
+/// # Panics
+///
+/// Panics if the tokio runtime cannot be built.
 pub fn main<F, Fut>(setup: F) -> !
 where
     F: FnOnce() -> Fut,
@@ -141,7 +172,7 @@ where
         .build()
         .expect("tokio runtime");
 
-    let plan = match rt.block_on(setup()) {
+    let mut plan = match rt.block_on(setup()) {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("{e:#}");
@@ -151,238 +182,313 @@ where
     };
 
     if args.list {
-        let trials = plan
-            .suites
-            .iter()
-            .flat_map(|s| {
-                s.tests
-                    .iter()
-                    .map(move |t| Trial::test(s.test_id(t), || Ok(())))
-            })
-            .collect();
-        libtest_mimic::run(&args, trials).exit();
+        libtest_mimic::run(&args, listed_trials(&plan.suites)).exit();
     }
 
     let nextest_run = std::env::var("NEXTEST_RUN_ID").ok();
-    let mut plan = plan;
-    let mut suites = vec![];
-    for s in &plan.suites {
-        let mut s = s.clone();
-        let ids: Vec<String> = s.tests.iter().map(|t| s.test_id(t)).collect();
-        let mut keep = ids.iter().map(|id| selected(&args, id));
-        s.tests.retain(|_| keep.next().unwrap_or(false));
-        if !s.tests.is_empty() {
-            suites.push(s);
-        }
-    }
+    let suites = filtered_suites(&plan.suites, &args);
 
     // Under nextest, hold cross-process locks for the whole process run.
     let _locks = match &nextest_run {
-        Some(run_id) if !suites.is_empty() => {
-            let dir = std::env::temp_dir().join(format!("apitest-{run_id}"));
-            plan.config.drift_cache = Some(dir.join("drift"));
-            if std::env::var("APITEST_NEXTEST_LOCKS").as_deref() == Ok("0") {
-                eprintln!("apitest: cross-process locks disabled (APITEST_NEXTEST_LOCKS=0)");
-                return_none_locks()
-            } else {
-                let tests = suites.iter().flat_map(|s| s.tests.iter());
-                let exclusive = tests
-                    .clone()
-                    .any(|t| t.opts.concurrency == crate::suite::Concurrency::Serial);
-                let resources: Vec<String> = tests
-                    .flat_map(|t| t.opts.resources.iter().cloned())
-                    .collect();
-                match xlock::acquire(&dir, exclusive, &resources) {
-                    Ok(l) => Some(l),
-                    Err(e) => {
-                        eprintln!(
-                            "apitest: could not take nextest locks in {}: {e}",
-                            dir.display()
-                        );
-                        None
-                    }
-                }
-            }
-        }
+        Some(run_id) if !suites.is_empty() => nextest_locks(run_id, &suites, &mut plan.config),
         _ => None,
     };
 
-    let mut reports: Vec<SuiteReport> = vec![];
-    let mut finally_results: Vec<(String, Result<()>)> = vec![];
+    // Under nextest every process runs only part of the suite, so "after
+    // everything" checks are meaningless there.
+    let run_finally = nextest_run.is_none() && !suites.is_empty();
     let finally = std::mem::take(&mut plan.finally);
-    rt.block_on(async {
-        for s in &suites {
-            reports.push(run_suite(s, &plan.config).await);
+    let (reports, finally_results) = execute(&rt, &suites, &plan.config, finally, run_finally);
+    drop(plan.keep);
+    rt.shutdown_background();
+
+    write_junit_if_requested(&reports);
+    let trials = if nextest_run.is_some() {
+        folded_trials(reports)
+    } else {
+        standard_trials(reports, finally_results)
+    };
+
+    libtest_mimic::run(&args, trials).exit()
+}
+
+/// One no-op trial per test, for `--list`.
+fn listed_trials(suites: &[Suite]) -> Vec<Trial> {
+    suites
+        .iter()
+        .flat_map(|s| {
+            s.tests
+                .iter()
+                .map(move |t| Trial::test(s.test_id(t), || Ok(())))
+        })
+        .collect()
+}
+
+/// Copies of the suites holding only the selected tests; suites left empty are dropped.
+fn filtered_suites(suites: &[Suite], args: &Arguments) -> Vec<Suite> {
+    let mut out = vec![];
+    for s in suites {
+        let mut s = s.clone();
+        let ids: Vec<String> = s.tests.iter().map(|t| s.test_id(t)).collect();
+        let mut keep = ids.iter().map(|id| selected(args, id));
+        s.tests.retain(|_| keep.next().unwrap_or(false));
+        if !s.tests.is_empty() {
+            out.push(s);
         }
-        // Under nextest every process runs only part of the suite, so "after
-        // everything" checks are meaningless there.
-        if nextest_run.is_none() && !suites.is_empty() {
+    }
+
+    out
+}
+
+/// Points the drift cache at the run's shared directory and takes the cross-process
+/// locks the selected tests need.
+///
+/// `APITEST_NEXTEST_LOCKS=0` disables the locks. Lock failures are reported on
+/// stderr and the run continues without them.
+fn nextest_locks(run_id: &str, suites: &[Suite], config: &mut RunConfig) -> Option<xlock::Held> {
+    let dir = std::env::temp_dir().join(format!("apitest-{run_id}"));
+    config.drift_cache = Some(dir.join("drift"));
+    if std::env::var("APITEST_NEXTEST_LOCKS").as_deref() == Ok("0") {
+        eprintln!("apitest: cross-process locks disabled (APITEST_NEXTEST_LOCKS=0)");
+        return None;
+    }
+
+    let tests = suites.iter().flat_map(|s| s.tests.iter());
+    let exclusive = tests
+        .clone()
+        .any(|t| t.opts.concurrency == crate::suite::Concurrency::Serial);
+    let resources: Vec<String> = tests
+        .flat_map(|t| t.opts.resources.iter().cloned())
+        .collect();
+
+    xlock::acquire(&dir, exclusive, &resources)
+        .inspect_err(|e| {
+            eprintln!(
+                "apitest: could not take nextest locks in {}: {e}",
+                dir.display()
+            );
+        })
+        .ok()
+}
+
+/// Runs the suites in order, then (if `run_finally`) the `finally` checks.
+fn execute(
+    rt: &Runtime,
+    suites: &[Suite],
+    config: &RunConfig,
+    finally: Vec<(String, Finally)>,
+    run_finally: bool,
+) -> (Vec<SuiteReport>, Vec<(String, Result<()>)>) {
+    rt.block_on(async {
+        let mut reports = vec![];
+        for s in suites {
+            reports.push(run_suite(s, config).await);
+        }
+
+        let mut finally_results = vec![];
+        if run_finally {
             for (name, f) in finally {
                 finally_results.push((name, f().await));
             }
         }
-    });
-    drop(plan.keep);
-    rt.shutdown_background();
 
-    if let Ok(path) = std::env::var("APITEST_JUNIT") {
-        if let Some(dir) = std::path::Path::new(&path).parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Err(e) = std::fs::write(&path, junit_xml(&reports)) {
-            eprintln!("apitest: writing {path}: {e}");
-        }
+        (reports, finally_results)
+    })
+}
+
+/// Writes a `JUnit` report to `$APITEST_JUNIT`, if set. Failures go to stderr.
+fn write_junit_if_requested(reports: &[SuiteReport]) {
+    let Ok(path) = std::env::var("APITEST_JUNIT") else {
+        return;
+    };
+
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
 
-    if nextest_run.is_some() {
-        libtest_mimic::run(&args, folded_trials(reports)).exit();
+    if let Err(e) = std::fs::write(&path, junit_xml(reports)) {
+        eprintln!("apitest: writing {path}: {e}");
     }
+}
 
-    let mut finally_trials: Vec<Trial> = finally_results
-        .into_iter()
-        .map(|(name, r)| {
-            let r = r.map_err(|e| Failed::from(format!("{e:#}")));
-            Trial::test(format!("apitest::[finally] {name}"), move || r)
-        })
-        .collect();
-
+/// Trials for a regular `cargo test` run: suite-level pseudo-tests, one trial per
+/// test, then the `finally` checks.
+fn standard_trials(
+    reports: Vec<SuiteReport>,
+    finally_results: Vec<(String, Result<()>)>,
+) -> Vec<Trial> {
     let mut trials = vec![];
     for r in reports {
-        for d in &r.drift {
-            let msg = d
-                .findings
-                .iter()
-                .map(|f| {
-                    format!(
-                        "{:?} {} @ {}: {}",
-                        f.severity, f.operation, f.location, f.message
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let breaking = d.is_breaking();
-            trials.push(Trial::test(
-                format!("{}::[contract] {}", r.suite, d.contract),
-                move || {
-                    if breaking {
-                        Err(Failed::from(msg))
-                    } else {
-                        Ok(())
-                    }
-                },
-            ));
-        }
+        trials.extend(r.drift.iter().map(|d| contract_trial(&r.suite, d)));
         if let Some(e) = r.setup_error.clone() {
             trials.push(Trial::test(format!("{}::[setup]", r.suite), move || {
                 Err(Failed::from(e))
             }));
         }
+
         if !r.teardown_errors.is_empty() {
             let e = r.teardown_errors.join("\n");
             trials.push(Trial::test(format!("{}::[teardown]", r.suite), move || {
                 Err(Failed::from(e))
             }));
         }
-        for t in r.tests {
-            let name = t.id.clone();
-            let trail = t.step_trail();
-            let trial = match t.outcome {
-                Outcome::Skipped { .. } => Trial::test(name, || Ok(())).with_ignored_flag(true),
-                Outcome::Passed if t.teardown_errors.is_empty() => Trial::test(name, || Ok(())),
-                Outcome::Passed => {
-                    let e = format!("cleanup failed:\n{}", t.teardown_errors.join("\n"));
-                    Trial::test(name, move || Err(Failed::from(e)))
-                }
-                Outcome::Failed { message } => {
-                    let mut e = if t.steps.is_empty() {
-                        message
-                    } else {
-                        format!("steps:\n{trail}\n\n{message}")
-                    };
-                    if !t.teardown_errors.is_empty() {
-                        e.push_str(&format!(
-                            "\ncleanup also failed:\n{}",
-                            t.teardown_errors.join("\n")
-                        ));
-                    }
-                    Trial::test(name, move || Err(Failed::from(e)))
-                }
-            };
-            trials.push(trial);
-        }
+
+        trials.extend(r.tests.into_iter().map(test_trial));
     }
-    trials.append(&mut finally_trials);
-    libtest_mimic::run(&args, trials).exit()
+
+    trials.extend(finally_results.into_iter().map(|(name, r)| {
+        let r = r.map_err(|e| Failed::from(format!("{e:#}")));
+        Trial::test(format!("apitest::[finally] {name}"), move || r)
+    }));
+    trials
 }
 
-fn return_none_locks() -> Option<xlock::Held> {
-    None
+/// The `suite::[contract] name` trial: fails with all findings if the drift is breaking.
+fn contract_trial(suite: &str, d: &DriftReport) -> Trial {
+    let msg = d
+        .findings
+        .iter()
+        .map(|f| {
+            format!(
+                "{:?} {} @ {}: {}",
+                f.severity, f.operation, f.location, f.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let breaking = d.is_breaking();
+
+    Trial::test(format!("{suite}::[contract] {}", d.contract), move || {
+        if breaking {
+            Err(Failed::from(msg))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// The trial of one test: ignored if skipped, failed with steps, error and cleanup
+/// errors otherwise.
+fn test_trial(t: TestReport) -> Trial {
+    let name = t.id.clone();
+    let trail = t.step_trail();
+    match t.outcome {
+        Outcome::Skipped { .. } => Trial::test(name, || Ok(())).with_ignored_flag(true),
+        Outcome::Passed if t.teardown_errors.is_empty() => Trial::test(name, || Ok(())),
+        Outcome::Passed => {
+            let e = format!("cleanup failed:\n{}", t.teardown_errors.join("\n"));
+            Trial::test(name, move || Err(Failed::from(e)))
+        }
+        Outcome::Failed { message } => {
+            let mut e = if t.steps.is_empty() {
+                message
+            } else {
+                format!("steps:\n{trail}\n\n{message}")
+            };
+            if !t.teardown_errors.is_empty() {
+                let _ = write!(
+                    e,
+                    "\ncleanup also failed:\n{}",
+                    t.teardown_errors.join("\n")
+                );
+            }
+
+            Trial::test(name, move || Err(Failed::from(e)))
+        }
+    }
 }
 
 /// One trial per test, with suite-level problems folded into each test's result.
 fn folded_trials(reports: Vec<SuiteReport>) -> Vec<Trial> {
     let mut trials = vec![];
     for r in reports {
-        let mut suite_problems = vec![];
-        for d in r.drift.iter().filter(|d| d.is_breaking()) {
-            let findings: Vec<String> = d
-                .findings
-                .iter()
-                .filter(|f| f.severity == crate::contract::Severity::Breaking)
-                .map(|f| format!("  {} @ {}: {}", f.operation, f.location, f.message))
-                .collect();
-            suite_problems.push(format!(
-                "contract '{}': live v{} is incompatible with pinned v{}:\n{}",
-                d.contract,
-                d.live_version,
-                d.pinned_version,
-                findings.join("\n")
-            ));
-        }
-        if let Some(e) = &r.setup_error {
-            suite_problems.push(format!("suite setup failed: {e}"));
-        }
-        for e in &r.teardown_errors {
-            suite_problems.push(format!("suite teardown failed: {e}"));
-        }
+        let suite_problems = suite_problems(&r);
         for t in r.tests {
-            let mut problems = suite_problems.clone();
-            let trail = t.step_trail();
-            match t.outcome {
-                Outcome::Failed { message } if !t.steps.is_empty() => {
-                    problems.insert(0, format!("steps:\n{trail}\n\n{message}"));
-                }
-                Outcome::Failed { message } => problems.insert(0, message),
-                Outcome::Skipped { reason } if suite_problems.is_empty() => {
-                    problems.push(format!("skipped: {reason}"));
-                }
-                _ => {}
-            }
-            problems.extend(
-                t.teardown_errors
-                    .iter()
-                    .map(|e| format!("cleanup failed: {e}")),
-            );
-            trials.push(Trial::test(t.id, move || {
-                if problems.is_empty() {
-                    Ok(())
-                } else {
-                    Err(Failed::from(problems.join("\n")))
-                }
-            }));
+            trials.push(folded_test_trial(t, &suite_problems));
         }
     }
+
     trials
 }
 
+/// Suite-level problems (breaking drift, setup and teardown failures) as messages.
+fn suite_problems(r: &SuiteReport) -> Vec<String> {
+    let mut problems = vec![];
+    for d in r.drift.iter().filter(|d| d.is_breaking()) {
+        let findings: Vec<String> = d
+            .findings
+            .iter()
+            .filter(|f| f.severity == crate::contract::Severity::Breaking)
+            .map(|f| format!("  {} @ {}: {}", f.operation, f.location, f.message))
+            .collect();
+        problems.push(format!(
+            "contract '{}': live v{} is incompatible with pinned v{}:\n{}",
+            d.contract,
+            d.live_version,
+            d.pinned_version,
+            findings.join("\n")
+        ));
+    }
+
+    if let Some(e) = &r.setup_error {
+        problems.push(format!("suite setup failed: {e}"));
+    }
+
+    for e in &r.teardown_errors {
+        problems.push(format!("suite teardown failed: {e}"));
+    }
+
+    problems
+}
+
+/// The trial of one test under nextest: its own failure first, then the suite's
+/// problems, then its cleanup errors. A skip only fails the trial when the suite
+/// had no problems to explain it.
+fn folded_test_trial(t: TestReport, suite_problems: &[String]) -> Trial {
+    let mut problems = suite_problems.to_vec();
+    let trail = t.step_trail();
+    match t.outcome {
+        Outcome::Failed { message } if !t.steps.is_empty() => {
+            problems.insert(0, format!("steps:\n{trail}\n\n{message}"));
+        }
+        Outcome::Failed { message } => problems.insert(0, message),
+        Outcome::Skipped { reason } if suite_problems.is_empty() => {
+            problems.push(format!("skipped: {reason}"));
+        }
+        _ => {}
+    }
+
+    problems.extend(
+        t.teardown_errors
+            .iter()
+            .map(|e| format!("cleanup failed: {e}")),
+    );
+
+    Trial::test(t.id, move || {
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(Failed::from(problems.join("\n")))
+        }
+    })
+}
+
 /// Cross-process locks for nextest's process-per-test model.
+///
+/// Advisory file locks in the run's temp directory: `serial.lock` (exclusive for
+/// serial tests, shared otherwise) and one exclusive `resource-<name>.lock` per
+/// resource, taken in sorted order so processes cannot deadlock.
 mod xlock {
     use std::fs::{File, OpenOptions};
     use std::path::Path;
 
-    /// Dropping the files releases the locks.
-    pub struct Held(#[expect(dead_code)] Vec<File>);
+    /// Held locks; dropping the files releases them.
+    pub struct Held {
+        /// The locked files, only kept open for their locks.
+        _files: Vec<File>,
+    }
 
+    /// Opens (creating if needed) a lock file without truncating it.
     fn open(path: &Path) -> std::io::Result<File> {
         OpenOptions::new()
             .create(true)
@@ -392,6 +498,12 @@ mod xlock {
             .open(path)
     }
 
+    /// Blocks until the global lock (exclusive if `exclusive`) and every resource lock
+    /// are held. Resource names are sanitized to ASCII alphanumerics and `_`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `dir` or a lock file cannot be created or a lock cannot be taken.
     pub fn acquire(dir: &Path, exclusive: bool, resources: &[String]) -> std::io::Result<Held> {
         std::fs::create_dir_all(dir)?;
         let mut held = vec![];
@@ -401,6 +513,7 @@ mod xlock {
         } else {
             global.lock_shared()?;
         }
+
         held.push(global);
         let mut res: Vec<&String> = resources.iter().collect();
         res.sort();
@@ -414,6 +527,7 @@ mod xlock {
             f.lock()?;
             held.push(f);
         }
-        Ok(Held(held))
+
+        Ok(Held { _files: held })
     }
 }
