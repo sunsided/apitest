@@ -75,7 +75,7 @@ tasks:
         sh: command -v npx
         msg: "Node.js not found - https://nodejs.org/"
     cmds:
-      - npx --yes -p typescript@5.8.3 tsc -p demo/suites/jsconfig.json
+      - npx --yes -p typescript@7.0.2 tsc -p demo/suites/jsconfig.json
 
   npm:smoke:
     desc: Pack the npm launcher and the host platform package, install them and run the CLI
