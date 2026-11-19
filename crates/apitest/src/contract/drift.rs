@@ -116,6 +116,27 @@ impl DriftReport {
             .iter()
             .any(|f| f.severity == Severity::Breaking)
     }
+
+    /// Masks secrets and redaction patterns in every text of the report: a
+    /// target URL or a finding may carry a key or a customer id.
+    pub fn redact(&mut self, r: &crate::redact::Redactor) {
+        for text in [
+            &mut self.contract,
+            &mut self.target,
+            &mut self.pinned_version,
+            &mut self.live_version,
+            &mut self.source,
+            &mut self.scope,
+        ] {
+            r.redact_in_place(text);
+        }
+
+        for f in &mut self.findings {
+            r.redact_in_place(&mut f.operation);
+            r.redact_in_place(&mut f.location);
+            r.redact_in_place(&mut f.message);
+        }
+    }
 }
 
 impl Contract {

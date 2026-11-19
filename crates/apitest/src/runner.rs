@@ -13,6 +13,7 @@
 //! ```
 
 mod drift;
+mod vars;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -40,8 +41,16 @@ pub struct RunConfig {
     /// Named services (`hub`, `app`, `mail`, ...) → base URL. Contracts and actors
     /// bound to a service send their requests there.
     pub services: BTreeMap<String, String>,
-    /// Variables visible through `cx.env(..)` (take precedence over the process environment).
+    /// Variables visible through `cx.env(..)` and `${NAME}` (`--var`). They win
+    /// over every other source; see [`RunConfig::lookup`] for the order.
     pub vars: BTreeMap<String, String>,
+    /// Variables read from `.env` files ([`RunConfig::env_file`]). The process
+    /// environment wins over them.
+    pub env_file_vars: BTreeMap<String, String>,
+    /// Defaults (`vars:` in `apitest.nova`), used when no other source has the name.
+    pub var_defaults: BTreeMap<String, String>,
+    /// Masks secrets and patterns in logs, errors and reports. Clones share it.
+    pub redactor: crate::redact::Redactor,
     /// Timeout for a test body, unless the test sets its own (default: 30 s).
     pub test_timeout: Duration,
     /// Timeout for each fixture setup, hook and cleanup.
@@ -89,6 +98,9 @@ impl Default for RunConfig {
             base_url: "http://127.0.0.1:8080".into(),
             services: BTreeMap::new(),
             vars: BTreeMap::new(),
+            env_file_vars: BTreeMap::new(),
+            var_defaults: BTreeMap::new(),
+            redactor: crate::redact::Redactor::default(),
             test_timeout: Duration::from_secs(30),
             hook_timeout: Duration::from_secs(30),
             validate_every: 1,
@@ -213,7 +225,8 @@ impl RunConfig {
         }
     }
 
-    /// Sets a variable visible through `cx.env(..)`, shadowing the process environment.
+    /// An explicit variable, like `--var k=v`; it wins over every other source
+    /// (see [`RunConfig::lookup`]).
     #[must_use]
     pub fn var(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.vars.insert(k.into(), v.into());
@@ -262,8 +275,11 @@ pub(crate) fn make_shared(suite: &Suite, cfg: &RunConfig) -> Result<Arc<Shared>>
 ///
 /// # Errors
 ///
-/// Fails if the trace parent is malformed.
+/// Fails if a variable the configured actors use does not resolve (see
+/// [`RunConfig::check_variables`]) or the trace parent is malformed.
 fn make_shared_with(suite: &Suite, cfg: &RunConfig, http: reqwest::Client) -> Result<Arc<Shared>> {
+    cfg.redactor.activate();
+    cfg.check_variables()?;
     let mut config = cfg.clone();
     if let Some(t) = &suite.tracing {
         config.tracing = t.clone();
@@ -468,12 +484,21 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Runs a suite functionally and returns its report.
+/// Runs a suite functionally and returns its report, with secrets and
+/// redaction patterns ([`RunConfig::redactor`]) masked.
 ///
 /// Never fails: setup problems skip the selected tests and land in
 /// [`SuiteReport::setup_error`]; teardown problems in [`SuiteReport::teardown_errors`].
-/// Suite teardown runs whenever the suite scope was created.
+/// Suite teardown runs whenever the suite scope was created. A variable the
+/// configured actors use that does not resolve is a setup problem: no test runs.
 pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
+    let mut report = run_suite_unmasked(suite, cfg).await;
+    report.redact(&cfg.redactor);
+    report
+}
+
+/// [`run_suite`] before masking.
+async fn run_suite_unmasked(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
     let started = Instant::now();
     let suite = Arc::new(suite.clone());
     let selected = select_tests(&suite, cfg);

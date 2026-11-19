@@ -5,37 +5,41 @@ use std::io::{ErrorKind, Write as _};
 
 use anyhow::{Context as _, Result};
 
+use apitest::Redactor;
 use apitest::http::Response;
 use apitest::runner::RunConfig;
 
 use super::actor::credential_headers;
 
-/// Writes the body to stdout as received, after `HTTP <status>` and the
-/// response headers with `-i`. A reader that stops early (`| head`) is fine.
+/// Writes the body to stdout, after `HTTP <status>` and the response headers
+/// with `-i`. A reader that stops early (`| head`) is fine.
+///
+/// Secrets and redaction patterns are masked here too: a token endpoint's
+/// answer must not end up in a terminal or CI log.
 ///
 /// # Errors
 ///
 /// Fails when stdout cannot be written for any reason but a closed pipe.
-pub fn write_response(resp: &Response, include: bool) -> Result<()> {
-    match write_to_stdout(resp, include) {
+pub fn write_response(resp: &Response, include: bool, redactor: &Redactor) -> Result<()> {
+    match write_to_stdout(resp, include, redactor) {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
         other => other.context("writing the response to stdout"),
     }
 }
 
 /// The unguarded write behind [`write_response`].
-fn write_to_stdout(resp: &Response, include: bool) -> std::io::Result<()> {
+fn write_to_stdout(resp: &Response, include: bool, redactor: &Redactor) -> std::io::Result<()> {
     let mut out = std::io::stdout().lock();
     if include {
         write!(out, "HTTP {}\r\n", resp.status)?;
         for (k, v) in &resp.headers {
-            write!(out, "{k}: {v}\r\n")?;
+            write!(out, "{}: {}\r\n", redactor.redact(k), redactor.redact(v))?;
         }
 
         write!(out, "\r\n")?;
     }
 
-    out.write_all(resp.text.as_bytes())?;
+    out.write_all(redactor.redact(&resp.text).as_bytes())?;
     out.flush()
 }
 

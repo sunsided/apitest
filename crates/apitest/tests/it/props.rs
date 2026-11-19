@@ -1,6 +1,9 @@
-//! Property tests for the parsers and the drift diff.
+//! Property tests for the parsers, the drift diff, `.env` parsing and redaction.
+
+use std::collections::BTreeMap;
 
 use apitest::Contract;
+use apitest::Redactor;
 use apitest::RunConfig;
 use apitest::contract::{ALL, DriftTarget, LIVE, Severity, Spec, SpecSource};
 use apitest::load::{Threshold, parse_duration, parse_quantity};
@@ -182,5 +185,97 @@ proptest! {
         if against.iter().any(|a| a == ALL) {
             prop_assert_eq!(selected.len(), names.len() + 1);
         }
+    }
+}
+
+/// Secrets over a tiny alphabet (with `*` and a multi-byte letter) and a text made of
+/// whole secrets and filler, so occurrences overlap, nest and touch each other and the mask.
+fn secrets_and_text() -> impl Strategy<Value = (Vec<String>, String)> {
+    prop::collection::vec("[ab*é]{4,7}", 1..5).prop_flat_map(|secrets| {
+        let piece = prop_oneof![prop::sample::select(secrets.clone()), "[ab*é ]{0,4}"];
+        let text = prop::collection::vec(piece, 0..12).prop_map(|p| p.concat());
+        (Just(secrets), text)
+    })
+}
+
+/// A redactor that knows `secrets`.
+fn redactor(secrets: &[String]) -> Redactor {
+    let r = Redactor::default();
+    for s in secrets {
+        r.secret(s);
+    }
+
+    r
+}
+
+/// Malformed `.env` lines; `VALUE` stands for the value the parser chokes on.
+const BROKEN_DOTENV: [&str; 5] = [
+    "A='VALUE",
+    "A=\"VALUE",
+    "BAD KEY=VALUE",
+    "A=VALUE 'x",
+    "A=\"$${VALUE\"",
+];
+
+proptest! {
+    /// No registered secret survives redaction, and redacting again changes nothing.
+    #[test]
+    fn redaction_never_leaks_a_registered_secret((secrets, text) in secrets_and_text()) {
+        let r = redactor(&secrets);
+        let out = r.redact(&text);
+        for s in &secrets {
+            prop_assert!(!out.contains(s.as_str()), "{s:?} in {out:?}");
+        }
+
+        prop_assert_eq!(r.redact(&out), out);
+    }
+
+    /// Literal patterns are masked wherever they occur, also next to secrets, and
+    /// redaction stays idempotent.
+    #[test]
+    fn patterns_are_masked_and_redaction_is_idempotent(
+        words in prop::collection::vec("[a-c]{2,4}", 1..4),
+        secrets in prop::collection::vec("[a-c*]{4,6}", 0..3),
+        text in "[a-c *]{0,40}",
+    ) {
+        let r = redactor(&secrets);
+        for w in &words {
+            r.pattern(w).unwrap();
+        }
+
+        let out = r.redact(&text);
+        for w in &words {
+            prop_assert!(!out.contains(w.as_str()), "{w:?} in {out:?}");
+        }
+
+        prop_assert_eq!(r.redact(&out), out);
+    }
+
+    /// Simple `KEY=value` lines parse to exactly those variables, later lines winning.
+    #[test]
+    fn dotenv_assignments_round_trip(
+        lines in prop::collection::vec(("[A-Z][A-Z0-9_]{0,6}", "[a-zA-Z0-9_./:-]{0,12}"), 0..8),
+    ) {
+        let text: String = lines.iter().flat_map(|(k, v)| [k, "=", v, "\n"]).collect();
+        let expected: BTreeMap<String, String> = lines.into_iter().collect();
+        prop_assert_eq!(apitest::dotenv::parse(&text).unwrap(), expected);
+    }
+
+    /// Malformed `.env` text fails without quoting the value it choked on.
+    #[test]
+    fn dotenv_errors_never_quote_values(
+        value in "zq[0-9]{6}",
+        shape in prop::sample::select(BROKEN_DOTENV.to_vec()),
+    ) {
+        let text = format!("OK=1\n{}\n", shape.replace("VALUE", &value).replace("$$", "$"));
+        if let Err(e) = apitest::dotenv::parse(&text) {
+            prop_assert!(!format!("{e:#}").contains(&value), "{e:#}");
+        }
+    }
+
+    /// Arbitrary text never makes the `.env` parser panic.
+    #[test]
+    fn dotenv_never_panics(text in any::<String>()) {
+        let _ = apitest::dotenv::parse(&text);
     }
 }

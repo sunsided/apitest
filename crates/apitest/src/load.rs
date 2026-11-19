@@ -513,6 +513,30 @@ pub struct LoadReport {
 }
 
 impl LoadReport {
+    /// Masks secrets and redaction patterns in every text of the report.
+    /// [`run_load`] does this before it returns.
+    pub fn redact(&mut self, r: &crate::redact::Redactor) {
+        r.redact_in_place(&mut self.suite);
+        self.drift.iter_mut().for_each(|d| d.redact(r));
+        if let Some(e) = &mut self.setup_error {
+            r.redact_in_place(e);
+        }
+
+        self.teardown_errors
+            .iter_mut()
+            .for_each(|e| r.redact_in_place(e));
+        for s in &mut self.scenarios {
+            r.redact_in_place(&mut s.name);
+            r.redact_in_place(&mut s.test);
+            s.sample_errors
+                .iter_mut()
+                .for_each(|e| r.redact_in_place(e));
+            s.thresholds
+                .iter_mut()
+                .for_each(|t| r.redact_in_place(&mut t.expr));
+        }
+    }
+
     /// `true` if setup and teardown succeeded and every threshold held.
     #[must_use]
     pub fn passed(&self) -> bool {
@@ -607,8 +631,16 @@ fn render_scenario(s: &mut String, sc: &ScenarioReport) {
 ///
 /// Never fails: problems end up in [`LoadReport::setup_error`] and
 /// [`LoadReport::teardown_errors`]. `after_all` hooks and suite cleanups run whenever
-/// the suite scope was created, even if setup failed.
+/// the suite scope was created, even if setup failed. Secrets and redaction
+/// patterns ([`RunConfig::redactor`]) are masked in the report.
 pub async fn run_load(plan: &LoadPlan, cfg: &RunConfig) -> LoadReport {
+    let mut report = run_load_unmasked(plan, cfg).await;
+    report.redact(&cfg.redactor);
+    report
+}
+
+/// [`run_load`] before masking.
+async fn run_load_unmasked(plan: &LoadPlan, cfg: &RunConfig) -> LoadReport {
     let suite = Arc::new(plan.suite.clone());
     let mut report = LoadReport {
         suite: suite.name.clone(),

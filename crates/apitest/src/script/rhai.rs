@@ -116,11 +116,18 @@ fn from_dyn(d: &Dynamic) -> RResult<Value> {
 
 /// Builds an engine with the suite, `cx` and assertion APIs registered.
 ///
-/// `print` goes to stderr, prefixed with `[rhai]`.
+/// `print` and `debug` go to stderr, prefixed with `[rhai]`, with secrets
+/// masked (see [`crate::redact::console`]).
 fn build_engine() -> Engine {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(128, 64);
-    engine.on_print(|s| eprintln!("  [rhai] {s}"));
+    engine.on_print(|s| eprintln!("{}", crate::redact::console(&format!("  [rhai] {s}"))));
+    engine.on_debug(|s, _source, pos| {
+        eprintln!(
+            "{}",
+            crate::redact::console(&format!("  [rhai debug {pos}] {s}"))
+        );
+    });
 
     register_suite_api(&mut engine);
     register_hook_api(&mut engine);

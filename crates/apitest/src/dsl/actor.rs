@@ -155,7 +155,10 @@ impl Actor {
             ..Default::default()
         };
         for (k, v) in &c.headers {
-            a = a.with_header(k.clone(), crate::auth::interpolate(v, cx)?);
+            // Configured header values usually carry keys or tokens.
+            let value = crate::auth::interpolate(v, cx)?;
+            cx.config().redactor.secret(&value);
+            a = a.with_header(k.clone(), value);
         }
 
         if let Some(ua) = &c.user_agent {
