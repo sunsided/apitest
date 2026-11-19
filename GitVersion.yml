@@ -1,6 +1,8 @@
 # GitVersion 7 (v7 configuration format). GitHub Flow: main -> X.Y.Z-alpha.N,
 # release/* and hotfix/* -> X.Y.Z-beta.N, a vX.Y.Z tag -> X.Y.Z. docs/versioning.md
 calculation:
+  # First release; drop once a v0.1.0 tag exists (tags take over from then on).
+  next-version: 0.1.0
   branches:
     main:
       label: alpha
