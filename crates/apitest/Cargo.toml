@@ -40,8 +40,8 @@ tokio.workspace = true
 reqwest = { version = "0.13", features = ["json", "form", "query"] }
 jsonschema = { version = "0.61", default-features = false }
 serde-saphyr = { version = "2.2", default-features = false, features = ["deserialize"] }
-novafile-serde = "0.2"
-novafile-schema = "0.2"
+novafile-serde = "0.3"
+novafile-schema = "0.3"
 sha2 = "0.11"
 hdrhistogram = { version = "7.6", default-features = false, optional = true }
 rhai = { version = "1.27", features = ["sync", "serde"], optional = true }

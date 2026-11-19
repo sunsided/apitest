@@ -998,18 +998,19 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "novafile-binary"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58d1136754005f0b7ad60ca23c117c07a1bf83a7c4b358f314f8f37ef9d4b240"
+checksum = "4732fbd3aaae20132f7cc2fe949dbd788c9e636c668434b5a05005ced2429ddb"
 dependencies = [
+ "novafile-text",
  "novafile-value",
 ]
 
 [[package]]
 name = "novafile-schema"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b730408928461b9918f47fabef5339757b8d9033757f7fcbd1a42913405ff41"
+checksum = "47748103b2d8832d78ae47b3ba4d4980fee1424eb193c49c0f8c756337551611"
 dependencies = [
  "base64",
  "novafile-text",
@@ -1019,9 +1020,9 @@ dependencies = [
 
 [[package]]
 name = "novafile-serde"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ace0ce4798f48a673b80b206d416be411324704923fe7ca32ddecb605bafdf"
+checksum = "4e3efd32e64914f71ace985d39634f765c5e02a8eb16ea4083584d9c5b9efbbf"
 dependencies = [
  "novafile-binary",
  "novafile-schema",
@@ -1032,9 +1033,9 @@ dependencies = [
 
 [[package]]
 name = "novafile-text"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa4d9e740986731806b4b19cab364ee2ce2cb50933cf66c698c180f39513cf76"
+checksum = "1f1833952c049c6b6298362d2a60be6f83073ae117094674c2721b7645d708b6"
 dependencies = [
  "base64",
  "novafile-value",
@@ -1042,9 +1043,9 @@ dependencies = [
 
 [[package]]
 name = "novafile-value"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a1f4180332ae8296c561be7a8b26862cc2e938c67abdaa1f40ac5c40df35a5a"
+checksum = "6daf6d9c87ea9c50f795a4f61d95f849cc379df2f63887a3ba9fb01cf0caf755"
 dependencies = [
  "num-bigint 0.5.1",
  "serde",
