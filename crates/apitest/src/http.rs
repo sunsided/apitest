@@ -799,7 +799,8 @@ impl Ctx {
         #[cfg(feature = "load")]
         self.record_metrics(&result, elapsed);
 
-        let (status, headers, bytes) = result.with_context(|| format!("{method} {url} failed"))?;
+        let (status, headers, bytes) =
+            result.with_context(|| format!("{method} {} failed", without_query(&url)))?;
         let text = decode_text(headers.get("content-type").map(String::as_str), &bytes);
         let response = Response {
             status,
@@ -993,6 +994,15 @@ async fn fetch(req: reqwest::RequestBuilder) -> reqwest::Result<Received> {
     Ok((status, headers, bytes))
 }
 
+/// `url` without its query and fragment, for error messages: a path may carry a
+/// credential inline (`/export?access_token=...`), and the redactor only knows
+/// secrets it was told about.
+fn without_query(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+
+    url[..end].to_string()
+}
+
 /// Decodes a body like `reqwest::Response::text` does: with the `charset` of
 /// `content_type` (UTF-8 if absent or unknown), BOM sniffed and stripped,
 /// invalid sequences replaced.
@@ -1042,7 +1052,17 @@ fn encode_segment(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_text;
+    use super::{decode_text, without_query};
+
+    #[test]
+    fn error_urls_drop_the_query() {
+        assert_eq!(
+            without_query("http://hub.test/export?access_token=s3cr3t#x"),
+            "http://hub.test/export"
+        );
+        assert_eq!(without_query("http://hub.test/a#frag"), "http://hub.test/a");
+        assert_eq!(without_query("http://hub.test/a"), "http://hub.test/a");
+    }
 
     #[test]
     fn text_is_decoded_with_the_declared_charset() {
