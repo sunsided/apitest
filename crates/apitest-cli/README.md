@@ -38,7 +38,9 @@ a run starts. Credentials, fetched tokens and `--redact` / `redact:` matches are
 [Variables, `.env` files and redaction](https://github.com/sunsided/apitest#variables-env-files-and-redaction).
 
 Exit codes: 0 passed, 1 tests or thresholds failed (for `apitest call`: a status other
-than 2xx or `--expect`), 2 usage or config error.
+than 2xx or `--expect`), 2 when the run could not be carried out: a usage or config
+error, and for `apitest call` also a failed login, a connection error, too many
+redirects or `--timeout`.
 
 ## License
 

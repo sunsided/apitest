@@ -1,5 +1,6 @@
 //! What `apitest call` writes: the response on stdout, the `-v` summary on stderr.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Write as _};
 
@@ -11,8 +12,8 @@ use apitest::runner::RunConfig;
 
 use super::actor::credential_headers;
 
-/// Writes the body to stdout, after `HTTP <status>` and the response headers
-/// with `-i`. A reader that stops early (`| head`) is fine.
+/// Writes the body to stdout as received, after `HTTP <status>` and the
+/// response headers with `-i`. A reader that stops early (`| head`) is fine.
 ///
 /// Secrets and redaction patterns are masked here too: a token endpoint's
 /// answer must not end up in a terminal or CI log.
@@ -39,49 +40,170 @@ fn write_to_stdout(resp: &Response, include: bool, redactor: &Redactor) -> std::
         write!(out, "\r\n")?;
     }
 
-    out.write_all(redactor.redact(&resp.text).as_bytes())?;
+    out.write_all(&masked_body(resp, redactor))?;
     out.flush()
 }
 
-/// Request and response lines for `--verbose`, with credential values redacted:
-/// cookies, `Authorization`, and with an actor also its credential header and
-/// the headers from its `headers:` (they may hold keys too).
-pub fn summary(resp: &Response, cfg: &RunConfig, actor: Option<&str>) -> String {
-    let mut secret = vec![
-        "authorization".to_string(),
-        "proxy-authorization".to_string(),
-        "cookie".to_string(),
-    ];
+/// The body to write: the bytes as received, so binary downloads stay intact,
+/// unless a secret or redaction pattern matches it. Then it is the masked text,
+/// and a binary body that holds a secret loses its exact bytes.
+fn masked_body<'a>(resp: &'a Response, redactor: &Redactor) -> Cow<'a, [u8]> {
+    let masked = redactor.redact(&resp.text);
+    if masked == resp.text {
+        Cow::Borrowed(&resp.bytes)
+    } else {
+        Cow::Owned(masked.into_bytes())
+    }
+}
+
+/// Request and response lines for `--verbose`, with credentials redacted: any
+/// header or query parameter [`is_sensitive`] by name, and with an actor also
+/// its credential header and the headers from its `headers:` (they may hold
+/// keys too). `query` is the `--query` pairs, which the sent URL lacks.
+pub fn summary(
+    resp: &Response,
+    cfg: &RunConfig,
+    actor: Option<&str>,
+    query: &[(String, String)],
+) -> String {
+    let mut secret = vec![];
     if let Some(a) = actor.and_then(|a| cfg.actors.get(a)) {
         secret.extend(credential_headers(cfg, a));
         secret.extend(a.headers.keys().cloned());
     }
 
-    let is_secret = |k: &str| secret.iter().any(|s| s.eq_ignore_ascii_case(k));
+    let shown = |k: &str, v: &str| {
+        if is_sensitive(k) || secret.iter().any(|s| s.eq_ignore_ascii_case(k)) {
+            redact(k, v)
+        } else {
+            v.to_string()
+        }
+    };
 
-    let mut s = format!("> {} {}\n", resp.request.method, resp.request.url);
+    let mut s = format!(
+        "> {} {}\n",
+        resp.request.method,
+        request_url(&resp.request.url, query)
+    );
     for (k, v) in &resp.request.headers {
-        let v = if is_secret(k) { redact(v) } else { v.clone() };
-        let _ = writeln!(s, "> {k}: {v}");
+        let _ = writeln!(s, "> {k}: {}", shown(k, v));
     }
 
     let _ = writeln!(s, "< HTTP {} ({:.0} ms)", resp.status, resp.elapsed_ms);
     for (k, v) in &resp.headers {
-        let v = if k.eq_ignore_ascii_case("set-cookie") {
-            redact(v)
-        } else {
-            v.clone()
-        };
-        let _ = writeln!(s, "< {k}: {v}");
+        let _ = writeln!(s, "< {k}: {}", shown(k, v));
     }
 
     s
 }
 
-/// Hides a credential but keeps its auth scheme (`Bearer`, `Basic`).
-fn redact(v: &str) -> String {
+/// Registers credentials passed on the command line as secrets of
+/// `redactor`, so they are masked wherever they show up (a body that echoes
+/// them, an error), not only in the `-v` lines: the values of `-H` headers whose
+/// names are [`is_sensitive`], and of `--query` parameters whose names are
+/// [`is_secret_param`].
+///
+/// Query names get the stricter test because a substring match (`keyword`
+/// contains `key`) would mask ordinary search terms in the body on stdout.
+pub fn register_secrets(
+    redactor: &Redactor,
+    headers: &[(String, String)],
+    query: &[(String, String)],
+) {
+    for (_, v) in headers.iter().filter(|(k, _)| is_sensitive(k)) {
+        register_value(redactor, v);
+    }
+
+    for (_, v) in query.iter().filter(|(k, _)| is_secret_param(k)) {
+        register_value(redactor, v);
+    }
+}
+
+/// Registers `v` and, when it starts with an alphabetic scheme-like word
+/// (`Bearer x`, `session abc123`), the part after that word too.
+fn register_value(redactor: &Redactor, v: &str) {
+    redactor.secret(v);
+    if let Some((scheme, credential)) = v.split_once(' ')
+        && scheme.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        redactor.secret(credential.trim());
+    }
+}
+
+/// Whether a query parameter name is a credential's: `key`, `apikey`, `sig`,
+/// `signature`, a name ending in `token`, `secret` or `password` (also
+/// camelCase such as `accessToken`), or one ending in `_key`/`-key`, ignoring
+/// case. `key` needs the separator so names like `monkey` stay visible.
+fn is_secret_param(name: &str) -> bool {
+    const EXACT: [&str; 4] = ["key", "apikey", "sig", "signature"];
+    const SUFFIXES: [&str; 3] = ["token", "secret", "password"];
+    let name = name.to_ascii_lowercase();
+
+    EXACT.contains(&name.as_str())
+        || SUFFIXES.iter().any(|s| name.ends_with(s))
+        || name.ends_with("_key")
+        || name.ends_with("-key")
+}
+
+/// Whether `name` is `Authorization` or `Proxy-Authorization`, whose values
+/// start with an auth scheme.
+fn is_authorization(name: &str) -> bool {
+    name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("proxy-authorization")
+}
+
+/// Whether a header or query parameter name suggests a credential: it contains
+/// `auth`, `cookie`, `token`, `key`, `secret`, `session`, `password` or
+/// `credential`, ignoring case (`Authorization`, `Set-Cookie`, `X-Api-Key`,
+/// `access_token`, ...).
+fn is_sensitive(name: &str) -> bool {
+    const PARTS: [&str; 8] = [
+        "auth",
+        "cookie",
+        "token",
+        "key",
+        "secret",
+        "session",
+        "password",
+        "credential",
+    ];
+    let name = name.to_ascii_lowercase();
+
+    PARTS.iter().any(|p| name.contains(p))
+}
+
+/// The URL as sent, with the `--query` pairs appended, sensitive parameters
+/// redacted and any `user:password@` removed.
+fn request_url(sent: &str, query: &[(String, String)]) -> String {
+    let Ok(mut url) = reqwest::Url::parse(sent) else {
+        return sent.to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .into_owned()
+        .chain(query.iter().cloned())
+        .collect();
+    if !pairs.is_empty() {
+        url.query_pairs_mut().clear().extend_pairs(
+            pairs
+                .iter()
+                .map(|(k, v)| (k, if is_sensitive(k) { "***" } else { v.as_str() })),
+        );
+    }
+
+    url.into()
+}
+
+/// Hides a credential. Only an `Authorization` or `Proxy-Authorization` value
+/// keeps its auth scheme (`Bearer ***`); anything else becomes `***`, since a
+/// first word there may be part of the secret.
+fn redact(name: &str, v: &str) -> String {
     match v.split_once(' ') {
-        Some((scheme, _)) if scheme.chars().all(|c| c.is_ascii_alphabetic()) => {
+        Some((scheme, _))
+            if is_authorization(name) && scheme.chars().all(|c| c.is_ascii_alphabetic()) =>
+        {
             format!("{scheme} ***")
         }
         _ => "***".into(),
@@ -90,13 +212,81 @@ fn redact(v: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::{is_secret_param, is_sensitive, redact, request_url};
 
     #[test]
-    fn redacts_credentials_but_keeps_the_scheme() {
-        assert_eq!(redact("Bearer abc.def"), "Bearer ***");
-        assert_eq!(redact("Basic dXNlcjpwdw=="), "Basic ***");
-        assert_eq!(redact("raw-key"), "***");
-        assert_eq!(redact("sid=1; Path=/"), "***");
+    fn only_authorization_keeps_its_scheme() {
+        assert_eq!(redact("Authorization", "Bearer abc.def"), "Bearer ***");
+        assert_eq!(
+            redact("proxy-authorization", "Basic dXNlcjpwdw=="),
+            "Basic ***"
+        );
+        assert_eq!(redact("Authorization", "raw-key"), "***");
+        assert_eq!(redact("X-Session", "session abc"), "***");
+        assert_eq!(redact("Cookie", "sid=1; Path=/"), "***");
+    }
+
+    #[test]
+    fn only_credential_query_names_are_secret_params() {
+        for n in [
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "token",
+            "api_key",
+            "apikey",
+            "key",
+            "password",
+            "client_secret",
+            "secret",
+            "sig",
+            "Signature",
+            "X-Api-Key",
+            "accessToken",
+            "clientSecret",
+            "authToken",
+            "userPassword",
+        ] {
+            assert!(is_secret_param(n), "{n}");
+        }
+
+        for n in ["q", "keyword", "author", "monkey", "page", "tokens_left"] {
+            assert!(!is_secret_param(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn credential_like_names_are_sensitive() {
+        for n in [
+            "Authorization",
+            "Proxy-Authorization",
+            "Cookie",
+            "set-cookie",
+            "X-Api-Key",
+            "X-Auth-Token",
+            "X-Session",
+            "client_secret",
+            "password",
+            "X-Credentials",
+        ] {
+            assert!(is_sensitive(n), "{n}");
+        }
+
+        for n in ["Content-Type", "X-Tenant", "Accept", "page"] {
+            assert!(!is_sensitive(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn the_request_url_shows_the_query_without_secrets() {
+        let q = [
+            ("page".to_string(), "2".to_string()),
+            ("api_key".to_string(), "k".to_string()),
+        ];
+        assert_eq!(
+            request_url("http://user:pw@hub.test/x?a=1&token=t", &q),
+            "http://hub.test/x?a=1&token=***&page=2&api_key=***"
+        );
+        assert_eq!(request_url("http://hub.test/x", &[]), "http://hub.test/x");
     }
 }

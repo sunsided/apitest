@@ -1,7 +1,10 @@
 //! `apitest call` end to end: the real binary against an in-process service.
 
+use std::io::Write as _;
 use std::path::{Path as FsPath, PathBuf};
+use std::process::Stdio;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query};
@@ -67,9 +70,22 @@ async fn status(Path(n): Path<u16>) -> StatusCode {
     StatusCode::from_u16(n).unwrap()
 }
 
-/// `GET /hop`: a same-origin redirect to `/status/204`.
+/// Bytes that are not valid UTF-8 in any position, for binary downloads.
+const BINARY: &[u8] = &[0x89, b'P', b'N', b'G', 0x00, 0xff, 0xfe, 0xc3, 0x28];
+
+/// `GET /binary`: [`BINARY`] as `application/octet-stream`.
+async fn binary() -> impl IntoResponse {
+    ([("content-type", "application/octet-stream")], BINARY)
+}
+
+/// `GET /hop`: a same-origin redirect to [`echo`].
 async fn hop() -> Redirect {
-    Redirect::to("/status/204")
+    Redirect::to("/echo")
+}
+
+/// `GET /loop`: a same-origin redirect to itself, forever.
+async fn redirect_loop() -> Redirect {
+    Redirect::to("/loop")
 }
 
 /// The test service, redirecting `/away` to `away` (another origin).
@@ -82,6 +98,8 @@ fn app(away: &str) -> Router {
         .route("/status/{n}", get(status))
         .route("/slow", get(slow))
         .route("/hop", get(hop))
+        .route("/loop", get(redirect_loop))
+        .route("/binary", get(binary))
         .route("/away", get(move || async move { Redirect::to(&away) }))
 }
 
@@ -108,6 +126,9 @@ fn serve_app(app: Router) -> String {
     format!("http://{}", rx.recv().unwrap())
 }
 
+/// Numbers the project directories of this test process, so no two tests share one.
+static NEXT_PROJECT: AtomicU64 = AtomicU64::new(0);
+
 /// A temporary project directory, removed when the test ends.
 struct Project(PathBuf);
 
@@ -129,12 +150,10 @@ impl Drop for Project {
 /// `hub_admin` actor that logs in and a `monitor` actor with an API key, plus
 /// the `extra` config lines.
 fn project(url: &str, extra: &str) -> Project {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("apitest-call-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let n = NEXT_PROJECT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("apitest-call-{}-{n}", std::process::id()));
+    // `create_dir` fails on a leftover instead of sharing it with another test.
+    std::fs::create_dir(&dir).unwrap();
 
     let cfg = format!(
         "services:
@@ -164,18 +183,37 @@ actors:
     Project(dir)
 }
 
-/// Runs `apitest call <args>` in `dir`, without colours or credential env vars.
-fn apitest(dir: &FsPath, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_apitest"))
-        .current_dir(dir)
+/// `apitest call <args>` in `dir`, without colours or credential env vars.
+fn command(dir: &FsPath, args: &[&str]) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_apitest"));
+    c.current_dir(dir)
         .arg("call")
         .args(args)
         .env_remove("HUB_USER")
         .env_remove("HUB_PASSWORD")
         .env_remove("CLICOLOR_FORCE")
-        .env("NO_COLOR", "1")
-        .output()
-        .unwrap()
+        .env("NO_COLOR", "1");
+
+    c
+}
+
+/// Runs `apitest call <args>` in `dir` with an empty stdin.
+fn apitest(dir: &FsPath, args: &[&str]) -> Output {
+    command(dir, args).output().unwrap()
+}
+
+/// Runs `apitest call <args>` in `dir` with `input` on stdin.
+fn apitest_with_stdin(dir: &FsPath, args: &[&str], input: &[u8]) -> Output {
+    let mut child = command(dir, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A process that exits before reading closes the pipe; that is not a test failure.
+    let _ = child.stdin.take().unwrap().write_all(input);
+
+    child.wait_with_output().unwrap()
 }
 
 /// The process's stdout as text.
@@ -432,7 +470,8 @@ fn headers_an_actor_sets_cannot_be_replaced() {
             "Authorization: Bearer mine",
         ],
     );
-    assert_eq!(v["authorization"], "Bearer mine");
+    // A -H credential is registered as a secret, so the echo shows it masked.
+    assert_eq!(v["authorization"], "***");
     assert_eq!(v["tenant"], "7");
 }
 
@@ -515,10 +554,35 @@ fn verbose_redacts_headers_from_the_actor_config() {
 }
 
 #[test]
-fn same_origin_redirects_are_followed() {
+fn same_origin_redirects_keep_the_actors_credentials() {
+    let dir = project(&serve(), LOGIN_FLOW);
+    let v = echo_json(&dir, &["hub", "GET", "/hop", "--as", "monitor"]);
+    // Stdout masks the registered key, so "***" shows it was sent after the hop.
+    assert_eq!(v["api_key"], "***");
+
+    let v = echo_json(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/hop",
+            "--as",
+            "hub_admin",
+            "--var",
+            "HUB_USER=admin@hub.test",
+            "--var",
+            "HUB_PASSWORD=s3cret",
+        ],
+    );
+    assert_eq!(v["authorization"], "***");
+}
+
+#[test]
+fn redirect_loops_stop_after_ten_hops() {
     let dir = project(&serve(), "");
-    let o = apitest(&dir, &["hub", "GET", "/hop", "--as", "monitor"]);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = apitest(&dir, &["hub", "GET", "/loop"]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("too many redirects"), "{}", stderr(&o));
 }
 
 #[test]
@@ -541,4 +605,201 @@ fn cross_origin_redirects_are_not_followed() {
     );
     // The other host is never contacted, so it never sees the API key.
     assert!(seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn binary_bodies_are_written_byte_for_byte() {
+    let dir = project(&serve(), "");
+    let o = apitest(&dir, &["hub", "GET", "/binary"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(o.stdout, BINARY);
+
+    // A redaction pattern still applies; the body then loses its exact bytes.
+    let o = apitest(&dir, &["hub", "GET", "/binary", "--redact", "PNG"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("***") && !stdout(&o).contains("PNG"),
+        "{}",
+        stdout(&o)
+    );
+}
+
+#[test]
+fn an_expected_redirect_is_not_reported() {
+    let dir = project(&serve(), "");
+    let o = apitest(&dir, &["hub", "GET", "/away", "--expect", "303"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stderr(&o), "");
+}
+
+#[test]
+fn verbose_shows_the_query_and_redacts_credentials_from_flags() {
+    let url = serve();
+    let dir = project(&url, "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/echo?a=1",
+            "--query",
+            "page=2",
+            "--query",
+            "access_token=q-secret",
+            "-H",
+            "X-Auth-Token: h-secret",
+            "-H",
+            "Authorization: Token two words",
+            "-v",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let err = stderr(&o);
+    assert!(
+        err.contains(&format!("> GET {url}/echo?a=1&page=2&access_token=***")),
+        "{err}"
+    );
+    assert!(err.contains("X-Auth-Token: ***"), "{err}");
+    assert!(err.contains("Authorization: Token ***"), "{err}");
+    for secret in ["q-secret", "h-secret", "two words"] {
+        assert!(!err.contains(secret), "{secret} leaked: {err}");
+    }
+
+    // A secret query value is masked beyond -v too, here in the echo on stdout,
+    // while a name that only contains `key` is ordinary data.
+    let out = stdout(&o);
+    assert!(out.contains(r#""access_token":"***""#), "{out}");
+    let v = echo_json(
+        &dir,
+        &["hub", "GET", "/echo", "--query", "keyword=red shoes", "-v"],
+    );
+    assert_eq!(v["query"]["keyword"], "red shoes");
+}
+
+#[test]
+fn bodies_come_from_stdin_files_or_at_at() {
+    let dir = project(&serve(), "");
+    let args = ["hub", "POST", "/echo", "--json", "@-"];
+    let o = apitest_with_stdin(&dir, &args, br#"{"from":"stdin"}"#);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&o.stdout).unwrap()["body"],
+        r#"{"from":"stdin"}"#
+    );
+
+    std::fs::write(dir.join("user.json"), r#"{"from":"file"}"#).unwrap();
+    let v = echo_json(&dir, &["hub", "POST", "/echo", "--json", "@user.json"]);
+    assert_eq!(v["body"], r#"{"from":"file"}"#);
+
+    let v = echo_json(&dir, &["hub", "POST", "/echo", "--data", "@@handle"]);
+    assert_eq!(v["body"], "@handle");
+
+    let o = apitest(&dir, &["hub", "POST", "/echo", "--data", "@"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("'@' needs a file name"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn bad_input_is_refused_before_the_body_is_read() {
+    let dir = project(&serve(), "");
+    for (args, why) in [
+        (
+            &["hub", "POST", "/echo", "-H", "X Foo: v", "--json", "@-"][..],
+            "invalid header name 'X Foo'",
+        ),
+        (
+            &["hub", "POST", "/echo", "-H", "X-A: a\nb", "--json", "@-"],
+            "invalid value for header 'X-A'",
+        ),
+        (
+            &["hub", "GE T", "/echo", "--json", "@-"],
+            "invalid HTTP method",
+        ),
+        (
+            &["hub", "POST", "/users/{id}", "--json", "@-"],
+            "has no path parameters",
+        ),
+    ] {
+        // Stdin is not JSON: reading it would fail differently.
+        let o = apitest_with_stdin(&dir, args, b"not json");
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(stderr(&o).contains(why), "{args:?}: {}", stderr(&o));
+    }
+}
+
+#[test]
+fn a_service_url_without_a_scheme_is_refused_by_name() {
+    let dir = project(&serve(), "");
+    std::fs::write(dir.join("other.nova"), "services:\n  hub: localhost:8080\n").unwrap();
+    let o = apitest(&dir, &["hub", "GET", "/x", "--config", "other.nova"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("service 'hub' in other.nova has the URL 'localhost:8080'"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn session_header_values_are_masked_after_their_scheme_word() {
+    let dir = project(&serve(), "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/echo",
+            "-H",
+            "X-Session: session abc123",
+            "-v",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(!stderr(&o).contains("abc123"), "{}", stderr(&o));
+}
+
+#[test]
+fn secret_query_values_never_reach_stderr_even_in_errors() {
+    // Nothing listens on port 9, so the connection is refused.
+    let dir = project("http://127.0.0.1:9", "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/x",
+            "--query",
+            "access_token=xyz",
+            "--query",
+            "q=hello",
+            "-v",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("GET http://127.0.0.1:9/x failed"), "{err}");
+    assert!(!err.contains("xyz"), "{err}");
+
+    let dir = project(&serve(), "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/echo",
+            "--query",
+            "access_token=xyz",
+            "--query",
+            "q=hello",
+            "-v",
+        ],
+    );
+    let err = stderr(&o);
+    assert!(err.contains("q=hello"), "{err}");
+    assert!(!err.contains("xyz"), "{err}");
 }

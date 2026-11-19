@@ -313,7 +313,8 @@ impl Ctx {
     /// the request, at most 10 times. A redirect to another origin is returned as
     /// the response instead: following it would send an actor's API-key or
     /// configured headers, which the HTTP client only strips for `Authorization`
-    /// and cookies, to that host.
+    /// and cookies, to that host. That includes an `http` to `https` upgrade of
+    /// the same host; configure the `https` URL instead.
     ///
     /// # Errors
     ///
@@ -333,22 +334,44 @@ impl Ctx {
     }
 }
 
-/// Redirect policy of [`Ctx::standalone`]: follow up to 10 redirects that stay
-/// on the origin of the first request, stop at any other.
+/// Redirect policy of [`Ctx::standalone`]; the decision is [`redirect_decision`].
 fn same_origin_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
-    let same_origin = attempt
-        .previous()
-        .first()
-        .is_some_and(|first| first.origin() == attempt.url().origin());
-    if !same_origin {
-        return attempt.stop();
+    match redirect_decision(attempt.previous(), attempt.url()) {
+        Ok(true) => attempt.follow(),
+        Ok(false) => attempt.stop(),
+        Err(e) => attempt.error(e),
+    }
+}
+
+/// Whether to follow a redirect to `next`: `Ok(true)` while it stays on the
+/// origin (scheme, host and port) of the first request and at most 10 were
+/// followed, `Ok(false)` to return the 3xx instead.
+///
+/// `previous` is every URL requested so far, the first request's URL first
+/// (reqwest pushes the current URL before asking the policy). An `http` to
+/// `https` upgrade on the same host is a different origin, so it is not
+/// followed: reqwest drops `Authorization` on a scheme change but keeps an
+/// API-key header, so a followed upgrade would authenticate some actors and
+/// not others.
+///
+/// # Errors
+///
+/// Fails after 10 redirects, and when `previous` is empty, so a change in
+/// reqwest can't silently disable redirects or the origin check.
+fn redirect_decision(previous: &[reqwest::Url], next: &reqwest::Url) -> Result<bool, &'static str> {
+    let Some(first) = previous.first() else {
+        return Err("redirect without the URL of the original request");
+    };
+
+    if first.origin() != next.origin() {
+        return Ok(false);
     }
 
-    if attempt.previous().len() > 10 {
-        return attempt.error("too many redirects");
+    if previous.len() > 10 {
+        return Err("too many redirects");
     }
 
-    attempt.follow()
+    Ok(true)
 }
 
 /// Runs fixtures of `scope` in declaration order, registering their teardowns.
@@ -753,4 +776,85 @@ pub async fn run_suites(suites: &[Suite], cfg: &RunConfig) -> Vec<SuiteReport> {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::Url;
+
+    use super::redirect_decision;
+
+    /// Parses a test URL.
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn redirects_stay_on_the_first_origin() {
+        let first = [url("http://hub.test/a")];
+        assert_eq!(
+            redirect_decision(&first, &url("http://hub.test/b")),
+            Ok(true)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("http://hub.test:80/b")),
+            Ok(true)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("http://hub.test:81/b")),
+            Ok(false)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("http://other.test/b")),
+            Ok(false)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("https://hub.test/b")),
+            Ok(false),
+            "no upgrade"
+        );
+
+        let https = [url("https://hub.test/a")];
+        assert_eq!(
+            redirect_decision(&https, &url("http://hub.test/b")),
+            Ok(false),
+            "no downgrade"
+        );
+    }
+
+    #[test]
+    fn the_origin_is_the_first_request_not_the_last_hop() {
+        // Were the last hop the reference, a second hop could leave the origin.
+        let chain = [url("http://hub.test/a"), url("http://hub.test/b")];
+        assert_eq!(
+            redirect_decision(&chain, &url("http://hub.test/c")),
+            Ok(true)
+        );
+        assert_eq!(
+            redirect_decision(&chain, &url("http://other.test/c")),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn ten_redirects_are_followed_not_eleven() {
+        let mut chain = vec![url("http://hub.test/0")];
+        for i in 1..=10 {
+            assert_eq!(
+                redirect_decision(&chain, &url(&format!("http://hub.test/{i}"))),
+                Ok(true)
+            );
+            chain.push(url(&format!("http://hub.test/{i}")));
+        }
+
+        assert_eq!(
+            redirect_decision(&chain, &url("http://hub.test/11")),
+            Err("too many redirects")
+        );
+    }
+
+    #[test]
+    fn an_empty_history_is_an_error_not_a_silent_stop() {
+        assert!(redirect_decision(&[], &url("http://hub.test/")).is_err());
+    }
 }
