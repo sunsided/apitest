@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{Body, Compat, Contract, OpUsage, Operation, Param, Spec};
+use super::{Body, Compat, Contract, LIVE, OpUsage, Operation, Param, Spec};
 
 /// Deepest schema nesting [`Differ::compare_schema`] descends into. Anything
 /// below is not compared, which bounds the work on recursive schemas.
@@ -68,16 +68,21 @@ impl Finding {
     }
 }
 
-/// The result of diffing one contract against its live spec.
+/// The result of diffing one contract against one drift target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriftReport {
     /// Name of the diffed [`Contract`].
     pub contract: String,
+    /// What the pin was compared against: [`LIVE`] or the name of a
+    /// [`DriftTarget`](super::DriftTarget). Reports written before targets
+    /// existed read as [`LIVE`].
+    #[serde(default = "live_target")]
+    pub target: String,
     /// `info.version` of the pinned spec.
     pub pinned_version: String,
-    /// `info.version` of the live spec.
+    /// `info.version` of the compared spec (the live one, or the target's).
     pub live_version: String,
-    /// Where the live spec came from (a URL, a file path or a description such
+    /// Where the compared spec came from (a URL, a file path or a description such
     /// as `in-process document`), for display only.
     pub source: String,
     /// Human-readable description of which operations were compared.
@@ -86,7 +91,23 @@ pub struct DriftReport {
     pub findings: Vec<Finding>,
 }
 
+/// The serde default of [`DriftReport::target`].
+fn live_target() -> String {
+    LIVE.to_string()
+}
+
 impl DriftReport {
+    /// The name of this check in reports: `billing` for the live spec,
+    /// `billing @ prod` for a named target, so live-only runs keep their names.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.target == LIVE {
+            self.contract.clone()
+        } else {
+            format!("{} @ {}", self.contract, self.target)
+        }
+    }
+
     /// Whether any finding is [`Severity::Breaking`], i.e. whether the suite
     /// must fail.
     #[must_use]
@@ -94,6 +115,27 @@ impl DriftReport {
         self.findings
             .iter()
             .any(|f| f.severity == Severity::Breaking)
+    }
+
+    /// Masks secrets and redaction patterns in every text of the report: a
+    /// target URL or a finding may carry a key or a customer id.
+    pub fn redact(&mut self, r: &crate::redact::Redactor) {
+        for text in [
+            &mut self.contract,
+            &mut self.target,
+            &mut self.pinned_version,
+            &mut self.live_version,
+            &mut self.source,
+            &mut self.scope,
+        ] {
+            r.redact_in_place(text);
+        }
+
+        for f in &mut self.findings {
+            r.redact_in_place(&mut f.operation);
+            r.redact_in_place(&mut f.location);
+            r.redact_in_place(&mut f.message);
+        }
     }
 }
 
@@ -106,7 +148,8 @@ impl Contract {
     /// compared, using its required parameters, all documented request fields
     /// and its `2xx` statuses; in [`Compat::Strict`] mode operations that only
     /// exist in `live` are reported as [`Severity::Info`]. `source` is copied
-    /// into [`DriftReport::source`].
+    /// into [`DriftReport::source`]; [`DriftReport::target`] is [`LIVE`], which
+    /// the drift check replaces when it compares against a named target.
     #[must_use]
     pub fn diff(&self, live: &Spec, used: Option<&[OpUsage]>, source: &str) -> DriftReport {
         let mut findings = vec![];
@@ -133,6 +176,7 @@ impl Contract {
 
         DriftReport {
             contract: self.name.clone(),
+            target: LIVE.to_string(),
             pinned_version: self.pinned.version.clone(),
             live_version: live.version.clone(),
             source: source.to_string(),

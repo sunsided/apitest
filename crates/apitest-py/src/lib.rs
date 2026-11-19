@@ -204,7 +204,7 @@ impl PyCtx {
             .map_err(|e| rt_err(&e))
     }
 
-    /// A `--var`/config variable or environment variable; raises if unset and
+    /// A variable (`--var`, the environment, `.env` files, then `vars:`); raises if unset and
     /// no `default` is given.
     #[pyo3(signature = (key, default=None))]
     fn env(&self, key: &str, default: Option<String>) -> PyResult<String> {

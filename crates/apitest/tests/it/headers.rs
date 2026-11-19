@@ -374,7 +374,7 @@ async fn login_failures_say_who_and_where() {
         &cfg(&srv).login_flow("svc", LoginFlow::path("/login")),
     )
     .await;
-    let Outcome::Failed { message } = &report.tests[0].outcome else {
+    let Outcome::Failed { message, .. } = &report.tests[0].outcome else {
         panic!("expected failure")
     };
     assert!(
@@ -465,4 +465,93 @@ async fn named_actors_from_config_with_variables() {
     for s in rhai_suites(rhai, std::path::Path::new(".")).unwrap() {
         run_suite(&s, &c).await.assert_passed();
     }
+}
+
+/// A fresh directory under the system temp dir for `.env` files, unique to `name`.
+fn env_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("apitest-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Client credentials from `.env` files win over `vars:` defaults, and the secret, the
+/// fetched token and pattern matches are masked in the report and its terminal form.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_from_env_files_are_masked_in_reports() {
+    let (srv, _) = start().await;
+    let dir = env_dir("envfile");
+    std::fs::write(dir.join(".env"), "APITEST_T_CLIENT_ID=nobody\n").unwrap();
+    std::fs::write(
+        dir.join(".env.local"),
+        "APITEST_T_CLIENT_ID=svc\nAPITEST_T_CLIENT_SECRET=s3cret\n",
+    )
+    .unwrap();
+    let token_url = format!("{}/oauth/token", srv.base_url());
+    let c = cfg(&srv)
+        .actor(
+            "reporting",
+            "svc",
+            Auth::ClientCredentials(ClientCredentials::new(
+                token_url,
+                "${APITEST_T_CLIENT_ID}",
+                "${APITEST_T_CLIENT_SECRET}",
+            )),
+        )
+        .var_default("APITEST_T_CLIENT_ID", "default-id")
+        .env_file(dir.join(".env"))
+        .unwrap()
+        .env_file(dir.join(".env.local"))
+        .unwrap()
+        .redact_pattern(r"cust-\d+")
+        .unwrap();
+    let suite = Suite::new("dotenv").test("leaks", |_| async move {
+        let me = actor("reporting")?.get("/me").expect(200).await?;
+        let token = me["token"].as_str().unwrap_or_default().to_string();
+        ensure!(token.starts_with("cc-"), "token {token}");
+        bail!("secret s3cret, token {token}, customer cust-1234")
+    });
+
+    let report = run_suite(&suite, &c).await;
+    let Outcome::Failed { message, chain } = &report.tests[0].outcome else {
+        panic!("expected a failure: {}", report.render())
+    };
+    assert_eq!(message, "secret ***, token ***, customer ***");
+    assert!(
+        chain
+            .iter()
+            .all(|c| !c.contains("s3cret") && !c.contains("cust-1234")),
+        "{chain:?}"
+    );
+    let rendered = report.render_terminal(false);
+    assert!(
+        !rendered.contains("s3cret") && !rendered.contains("cust-1234"),
+        "{rendered}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Unresolved actor variables stop the suite before any test, listing every field.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_variables_fail_before_any_test_runs() {
+    let (srv, _) = start().await;
+    let c = cfg(&srv)
+        .actor(
+            "a",
+            "svc",
+            Auth::login("svc", "${APITEST_T_NOPE_USER}", "${APITEST_T_NOPE_PW}"),
+        )
+        .actor("b", "svc", Auth::bearer("${APITEST_T_NOPE_PW}"));
+    let suite = Suite::new("missing").test("never runs", |_| async move { bail!("must not run") });
+
+    let report = run_suite(&suite, &c).await;
+    let err = report.setup_error.clone().expect("setup error");
+    assert!(
+        err.contains("APITEST_T_NOPE_PW (used by actors.a.auth.password, actors.b.auth.token)"),
+        "{err}"
+    );
+    assert!(
+        err.contains("APITEST_T_NOPE_USER (used by actors.a.auth.username)"),
+        "{err}"
+    );
+    assert!(matches!(report.tests[0].outcome, Outcome::Skipped { .. }));
 }

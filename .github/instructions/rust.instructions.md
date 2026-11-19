@@ -24,3 +24,7 @@ applyTo: "**/*.rs"
 - `#![forbid(unsafe_code)]` in every crate.
 - New public API in `apitest` that parses input (specs, NOVA files, headers, thresholds) gets
   a property test in `tests/it/props.rs` or a fuzz target in `fuzz/`.
+- Machine-read output stays plain text: `SuiteReport::render`, `junit_xml`, the JSON
+  report, `assert_passed` and the libtest harness messages carry no colours or miette
+  glyphs. miette rendering belongs in `SuiteReport::render_terminal` and the CLI only, behind
+  the `diagnostics` feature.

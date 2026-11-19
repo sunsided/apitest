@@ -373,13 +373,15 @@ pub fn parse_quantity(s: &str) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Fails if `s` is not a valid quantity (see [`parse_quantity`]).
-///
-/// # Panics
-///
-/// Panics if the quantity is negative, not finite, or too large for a [`Duration`].
+/// Fails if `s` is not a valid quantity (see [`parse_quantity`]), is a
+/// percentage, or is negative, not finite, or too large for a [`Duration`].
 pub fn parse_duration(s: &str) -> Result<Duration> {
-    Ok(Duration::from_secs_f64(parse_quantity(s)? / 1000.0))
+    if s.trim().ends_with('%') {
+        bail!("invalid duration '{s}': a percentage is not a time (expected e.g. 500ms, 30s, 2m)");
+    }
+
+    Duration::try_from_secs_f64(parse_quantity(s)? / 1000.0)
+        .map_err(|_| anyhow!("invalid duration '{s}' (expected e.g. 500ms, 30s, 2m)"))
 }
 
 /// One load scenario: a functional test driven by an executor, plus pass criteria.
@@ -504,7 +506,7 @@ pub struct ScenarioReport {
 pub struct LoadReport {
     /// Suite name.
     pub suite: String,
-    /// Drift-check results, one per contract with a live spec.
+    /// Drift-check results, one per contract and selected drift target it has a spec for.
     pub drift: Vec<DriftReport>,
     /// Why the run stopped before or between scenarios, if it did.
     pub setup_error: Option<String>,
@@ -515,6 +517,30 @@ pub struct LoadReport {
 }
 
 impl LoadReport {
+    /// Masks secrets and redaction patterns in every text of the report.
+    /// [`run_load`] does this before it returns.
+    pub fn redact(&mut self, r: &crate::redact::Redactor) {
+        r.redact_in_place(&mut self.suite);
+        self.drift.iter_mut().for_each(|d| d.redact(r));
+        if let Some(e) = &mut self.setup_error {
+            r.redact_in_place(e);
+        }
+
+        self.teardown_errors
+            .iter_mut()
+            .for_each(|e| r.redact_in_place(e));
+        for s in &mut self.scenarios {
+            r.redact_in_place(&mut s.name);
+            r.redact_in_place(&mut s.test);
+            s.sample_errors
+                .iter_mut()
+                .for_each(|e| r.redact_in_place(e));
+            s.thresholds
+                .iter_mut()
+                .for_each(|t| r.redact_in_place(&mut t.expr));
+        }
+    }
+
     /// `true` if setup and teardown succeeded and every threshold held.
     #[must_use]
     pub fn passed(&self) -> bool {
@@ -541,8 +567,8 @@ impl LoadReport {
             };
             let _ = writeln!(
                 s,
-                "  contract {}: pinned v{} vs live v{} → {verdict}",
-                d.contract, d.pinned_version, d.live_version,
+                "  contract {}: pinned v{} vs {} v{} → {verdict}",
+                d.contract, d.pinned_version, d.target, d.live_version,
             );
         }
 
@@ -609,8 +635,16 @@ fn render_scenario(s: &mut String, sc: &ScenarioReport) {
 ///
 /// Never fails: problems end up in [`LoadReport::setup_error`] and
 /// [`LoadReport::teardown_errors`]. `after_all` hooks and suite cleanups run whenever
-/// the suite scope was created, even if setup failed.
+/// the suite scope was created, even if setup failed. Secrets and redaction
+/// patterns ([`RunConfig::redactor`]) are masked in the report.
 pub async fn run_load(plan: &LoadPlan, cfg: &RunConfig) -> LoadReport {
+    let mut report = run_load_unmasked(plan, cfg).await;
+    report.redact(&cfg.redactor);
+    report
+}
+
+/// [`run_load`] before masking.
+async fn run_load_unmasked(plan: &LoadPlan, cfg: &RunConfig) -> LoadReport {
     let suite = Arc::new(plan.suite.clone());
     let mut report = LoadReport {
         suite: suite.name.clone(),
@@ -660,8 +694,10 @@ async fn preflight(
     *drift = check_drift(&suite.contracts, cfg)
         .await
         .map_err(|e| format!("contract check: {e:#}"))?;
-    if cfg.check_drift && drift.iter().any(DriftReport::is_breaking) {
-        return Err("live API is incompatible with the pinned contract".into());
+    if cfg.check_drift
+        && let Some(error) = crate::runner::drift_failure(drift)
+    {
+        return Err(error);
     }
 
     Ok(shared)

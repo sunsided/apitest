@@ -1,8 +1,14 @@
-//! Property tests for the parsers and the drift diff.
+//! Property tests for the parsers, the drift diff, `.env` parsing and redaction.
+
+use std::collections::BTreeMap;
+
+use std::time::Duration;
 
 use apitest::Contract;
-use apitest::contract::{Severity, Spec};
-use apitest::load::{Threshold, parse_quantity};
+use apitest::Redactor;
+use apitest::RunConfig;
+use apitest::contract::{ALL, DriftTarget, LIVE, Severity, Spec, SpecSource};
+use apitest::load::{Threshold, parse_duration, parse_quantity};
 use apitest::trace::Traceparent;
 use proptest::prelude::*;
 use serde_json::{Map, Value, json};
@@ -114,6 +120,39 @@ proptest! {
         prop_assert_eq!(parse_quantity(&n.to_string()).unwrap(), v);
     }
 
+    /// Durations in every time unit parse to the value written; a bare number is milliseconds.
+    #[test]
+    fn durations_parse_in_every_time_unit(n in 0u32..1_000_000) {
+        let ms = f64::from(n);
+
+        prop_assert_eq!(parse_duration(&format!("{n}s")).unwrap(), Duration::from_secs(n.into()));
+        prop_assert_eq!(parse_duration(&format!("{n}m")).unwrap(), Duration::from_secs(u64::from(n) * 60));
+        for s in [format!("{n}ms"), n.to_string()] {
+            let d = parse_duration(&s).unwrap();
+            prop_assert!((d.as_secs_f64() * 1000.0 - ms).abs() < 1e-6, "{s} parsed to {d:?}");
+        }
+    }
+
+    /// Percentages, negative, non-finite and overflowing durations are errors, not panics.
+    #[test]
+    fn invalid_durations_are_errors(
+        s in prop_oneof![
+            "[0-9]{1,4}(\\.[0-9])?%",
+            "-[1-9][0-9]{0,4}(ms|s|m)?",
+            "-?(inf|infinity|NaN|INF|nan)(ms|s|m)?",
+            "[1-9]e[3-9][0-9]{2}(ms|s|m)?",
+            "[0-9]{1,3}(h|d|x|sec)",
+        ],
+    ) {
+        prop_assert!(parse_duration(&s).is_err(), "{s} was accepted");
+    }
+
+    /// Arbitrary input never panics the duration parser.
+    #[test]
+    fn durations_never_panic(s in "-?[0-9.e+-]{0,8}(ms|s|m|%|inf|NaN)?") {
+        let _ = parse_duration(&s);
+    }
+
     /// Every comparison operator is accepted, for both metric groups.
     #[test]
     fn thresholds_accept_every_operator(
@@ -124,5 +163,151 @@ proptest! {
         let expr = format!("{group}.p95 {op} {n}ms");
 
         prop_assert!(Threshold::parse(&expr).is_ok(), "{expr}");
+    }
+
+    /// A spec reference never panics: an `http(s)://` prefix in any case makes a URL,
+    /// kept as given apart from surrounding whitespace; anything else is a file under
+    /// the root (or absolute).
+    #[test]
+    fn spec_sources_are_urls_or_files(
+        scheme in prop::sample::select(vec!["", "http://", "https://", "HTTPS://", "Http://", "ftp://", "http:/"]),
+        rest in "\\PC{0,20}",
+    ) {
+        let raw = format!(" {scheme}{rest} ");
+        let lower = raw.trim().to_ascii_lowercase();
+        let is_url = lower.starts_with("http://") || lower.starts_with("https://");
+
+        // An absolute base on every platform: "/root" has no drive letter on Windows.
+        let base = std::env::temp_dir();
+
+        match SpecSource::parse(&raw, &base) {
+            SpecSource::Url(u) => {
+                prop_assert!(is_url, "{raw:?} became URL {u:?}");
+                prop_assert_eq!(u, raw.trim());
+            }
+            SpecSource::File(p) => {
+                prop_assert!(!is_url, "{raw:?} became file {p:?}");
+                let typed = std::path::Path::new(raw.trim());
+                let expected = if typed.is_absolute() { typed.to_path_buf() } else { base.join(typed) };
+                prop_assert_eq!(p, expected);
+            }
+            SpecSource::Document(_) => prop_assert!(false, "parsed into a document"),
+        }
+    }
+
+    /// The selection never repeats a target, only names known targets, and with
+    /// `all` covers `live` and every named target.
+    #[test]
+    fn drift_selection_is_unique_and_complete(
+        names in prop::collection::btree_set("[a-z]{1,4}", 0..4),
+        picks in prop::collection::vec(any::<prop::sample::Index>(), 0..8),
+    ) {
+        let names: Vec<String> = names.into_iter().filter(|n| n != LIVE && n != ALL).collect();
+        let pool: Vec<String> = names.iter().cloned().chain([LIVE.into(), ALL.into()]).collect();
+        let against: Vec<String> = picks.iter().map(|i| i.get(&pool).clone()).collect();
+        let cfg = names
+            .iter()
+            .fold(RunConfig::default(), |c, n| c.drift_target(n.clone(), DriftTarget::new()))
+            .drift_against(against.clone());
+
+        let selected = cfg.selected_drift_targets().unwrap();
+        let unique: std::collections::BTreeSet<&str> = selected.iter().copied().collect();
+        prop_assert_eq!(unique.len(), selected.len());
+        prop_assert!(selected.iter().all(|t| *t == LIVE || names.iter().any(|n| n == t)));
+        if against.iter().any(|a| a == ALL) {
+            prop_assert_eq!(selected.len(), names.len() + 1);
+        }
+    }
+}
+
+/// Secrets over a tiny alphabet (with `*` and a multi-byte letter) and a text made of
+/// whole secrets and filler, so occurrences overlap, nest and touch each other and the mask.
+fn secrets_and_text() -> impl Strategy<Value = (Vec<String>, String)> {
+    prop::collection::vec("[ab*é]{4,7}", 1..5).prop_flat_map(|secrets| {
+        let piece = prop_oneof![prop::sample::select(secrets.clone()), "[ab*é ]{0,4}"];
+        let text = prop::collection::vec(piece, 0..12).prop_map(|p| p.concat());
+        (Just(secrets), text)
+    })
+}
+
+/// A redactor that knows `secrets`.
+fn redactor(secrets: &[String]) -> Redactor {
+    let r = Redactor::default();
+    for s in secrets {
+        r.secret(s);
+    }
+
+    r
+}
+
+/// Malformed `.env` lines; `VALUE` stands for the value the parser chokes on.
+const BROKEN_DOTENV: [&str; 5] = [
+    "A='VALUE",
+    "A=\"VALUE",
+    "BAD KEY=VALUE",
+    "A=VALUE 'x",
+    "A=\"$${VALUE\"",
+];
+
+proptest! {
+    /// No registered secret survives redaction, and redacting again changes nothing.
+    #[test]
+    fn redaction_never_leaks_a_registered_secret((secrets, text) in secrets_and_text()) {
+        let r = redactor(&secrets);
+        let out = r.redact(&text);
+        for s in &secrets {
+            prop_assert!(!out.contains(s.as_str()), "{s:?} in {out:?}");
+        }
+
+        prop_assert_eq!(r.redact(&out), out);
+    }
+
+    /// Literal patterns are masked wherever they occur, also next to secrets, and
+    /// redaction stays idempotent.
+    #[test]
+    fn patterns_are_masked_and_redaction_is_idempotent(
+        words in prop::collection::vec("[a-c]{2,4}", 1..4),
+        secrets in prop::collection::vec("[a-c*]{4,6}", 0..3),
+        text in "[a-c *]{0,40}",
+    ) {
+        let r = redactor(&secrets);
+        for w in &words {
+            r.pattern(w).unwrap();
+        }
+
+        let out = r.redact(&text);
+        for w in &words {
+            prop_assert!(!out.contains(w.as_str()), "{w:?} in {out:?}");
+        }
+
+        prop_assert_eq!(r.redact(&out), out);
+    }
+
+    /// Simple `KEY=value` lines parse to exactly those variables, later lines winning.
+    #[test]
+    fn dotenv_assignments_round_trip(
+        lines in prop::collection::vec(("[A-Z][A-Z0-9_]{0,6}", "[a-zA-Z0-9_./:-]{0,12}"), 0..8),
+    ) {
+        let text: String = lines.iter().flat_map(|(k, v)| [k, "=", v, "\n"]).collect();
+        let expected: BTreeMap<String, String> = lines.into_iter().collect();
+        prop_assert_eq!(apitest::dotenv::parse(&text).unwrap(), expected);
+    }
+
+    /// Malformed `.env` text fails without quoting the value it choked on.
+    #[test]
+    fn dotenv_errors_never_quote_values(
+        value in "zq[0-9]{6}",
+        shape in prop::sample::select(BROKEN_DOTENV.to_vec()),
+    ) {
+        let text = format!("OK=1\n{}\n", shape.replace("VALUE", &value).replace("$$", "$"));
+        if let Err(e) = apitest::dotenv::parse(&text) {
+            prop_assert!(!format!("{e:#}").contains(&value), "{e:#}");
+        }
+    }
+
+    /// Arbitrary text never makes the `.env` parser panic.
+    #[test]
+    fn dotenv_never_panics(text in any::<String>()) {
+        let _ = apitest::dotenv::parse(&text);
     }
 }

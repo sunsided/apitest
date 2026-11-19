@@ -3,6 +3,8 @@
 //! Modules that need optional features are compiled only when those features are on, so the
 //! property tests still run in lean builds.
 
+#[cfg(all(feature = "axum", feature = "diagnostics"))]
+mod diagnostics;
 #[cfg(all(feature = "axum", feature = "rhai", feature = "js"))]
 mod headers;
 mod props;
