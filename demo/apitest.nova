@@ -15,6 +15,7 @@ vars:
 suites:
   - suites/billing.rhai
   - suites/billing.js
+  - suites/billing.feature
 
 reports:
   junit: ../target/apitest/junit.xml
