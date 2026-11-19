@@ -972,8 +972,11 @@ fn render_url(path: &str, params: &Map<String, Value>, base_url: &str) -> Result
 }
 
 /// Sends the request and reads the whole body.
+///
+/// Errors carry no URL: the caller names the method and the URL without its
+/// query, and the query may hold a credential (`?access_token=...`).
 async fn fetch(req: reqwest::RequestBuilder) -> reqwest::Result<Received> {
-    let r = req.send().await?;
+    let r = req.send().await.map_err(reqwest::Error::without_url)?;
     let status = r.status().as_u16();
     let headers = r
         .headers()
@@ -985,7 +988,7 @@ async fn fetch(req: reqwest::RequestBuilder) -> reqwest::Result<Received> {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let bytes = r.bytes().await?;
+    let bytes = r.bytes().await.map_err(reqwest::Error::without_url)?;
 
     Ok((status, headers, bytes))
 }

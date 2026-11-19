@@ -140,7 +140,7 @@ pub async fn call(a: Args, redactor: &Redactor) -> Result<bool> {
     // Only the actor this call uses must resolve: an unrelated actor's missing
     // secret doesn't block a one-off request.
     cfg.actors.retain(|name, _| a.actor.as_ref() == Some(name));
-    output::register_secrets(redactor, &a.header);
+    output::register_secrets(redactor, &a.header, &a.query);
     let opts = request_opts(&a)?;
     let resp = send(&cfg, &a, opts).await?;
     if a.verbose {

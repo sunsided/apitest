@@ -666,10 +666,10 @@ fn verbose_shows_the_query_and_redacts_credentials_from_flags() {
         assert!(!err.contains(secret), "{secret} leaked: {err}");
     }
 
-    // Query values are only masked in -v: a name like `keyword` contains `key`,
-    // and the echoed data on stdout must stay intact.
+    // A secret query value is masked beyond -v too, here in the echo on stdout,
+    // while a name that only contains `key` is ordinary data.
     let out = stdout(&o);
-    assert!(out.contains(r#""access_token":"q-secret""#), "{out}");
+    assert!(out.contains(r#""access_token":"***""#), "{out}");
     let v = echo_json(
         &dir,
         &["hub", "GET", "/echo", "--query", "keyword=red shoes", "-v"],
@@ -743,4 +743,63 @@ fn a_service_url_without_a_scheme_is_refused_by_name() {
         "{}",
         stderr(&o)
     );
+}
+
+#[test]
+fn session_header_values_are_masked_after_their_scheme_word() {
+    let dir = project(&serve(), "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/echo",
+            "-H",
+            "X-Session: session abc123",
+            "-v",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(!stderr(&o).contains("abc123"), "{}", stderr(&o));
+}
+
+#[test]
+fn secret_query_values_never_reach_stderr_even_in_errors() {
+    // Nothing listens on port 9, so the connection is refused.
+    let dir = project("http://127.0.0.1:9", "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/x",
+            "--query",
+            "access_token=xyz",
+            "--query",
+            "q=hello",
+            "-v",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("GET http://127.0.0.1:9/x failed"), "{err}");
+    assert!(!err.contains("xyz"), "{err}");
+
+    let dir = project(&serve(), "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/echo",
+            "--query",
+            "access_token=xyz",
+            "--query",
+            "q=hello",
+            "-v",
+        ],
+    );
+    let err = stderr(&o);
+    assert!(err.contains("q=hello"), "{err}");
+    assert!(!err.contains("xyz"), "{err}");
 }

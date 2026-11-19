@@ -97,23 +97,59 @@ pub fn summary(
     s
 }
 
-/// Registers the values of `-H` headers whose names are [`is_sensitive`] as
-/// secrets of `redactor`, so they are masked wherever they show up (a body that
-/// echoes them, an error), not only in the `-v` lines. An `Authorization`
-/// value registers its credential without the scheme too.
+/// Registers credentials passed on the command line as secrets of
+/// `redactor`, so they are masked wherever they show up (a body that echoes
+/// them, an error), not only in the `-v` lines: the values of `-H` headers whose
+/// names are [`is_sensitive`], and of `--query` parameters whose names are
+/// [`is_secret_param`].
 ///
-/// `--query` values are only redacted in `-v`: the name test is a substring
-/// match (`keyword` contains `key`), and masking a search term in the body on
-/// stdout would garble the data.
-pub fn register_secrets(redactor: &Redactor, headers: &[(String, String)]) {
-    for (k, v) in headers.iter().filter(|(k, _)| is_sensitive(k)) {
-        redactor.secret(v);
-        if is_authorization(k)
-            && let Some((_, credential)) = v.split_once(' ')
-        {
-            redactor.secret(credential.trim());
-        }
+/// Query names get the stricter test because a substring match (`keyword`
+/// contains `key`) would mask ordinary search terms in the body on stdout.
+pub fn register_secrets(
+    redactor: &Redactor,
+    headers: &[(String, String)],
+    query: &[(String, String)],
+) {
+    for (_, v) in headers.iter().filter(|(k, _)| is_sensitive(k)) {
+        register_value(redactor, v);
     }
+
+    for (_, v) in query.iter().filter(|(k, _)| is_secret_param(k)) {
+        register_value(redactor, v);
+    }
+}
+
+/// Registers `v` and, when it starts with an alphabetic scheme-like word
+/// (`Bearer x`, `session abc123`), the part after that word too.
+fn register_value(redactor: &Redactor, v: &str) {
+    redactor.secret(v);
+    if let Some((scheme, credential)) = v.split_once(' ')
+        && scheme.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        redactor.secret(credential.trim());
+    }
+}
+
+/// Whether a query parameter name is a credential's: `token`, `key`,
+/// `apikey`, `password`, `secret`, `sig`, `signature`, or a name ending in
+/// `_token`, `_key`, `_secret` or `_password` (also with `-`), ignoring case.
+fn is_secret_param(name: &str) -> bool {
+    const EXACT: [&str; 7] = [
+        "token",
+        "key",
+        "apikey",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+    ];
+    const SUFFIXES: [&str; 4] = ["token", "key", "secret", "password"];
+    let name = name.to_ascii_lowercase();
+
+    EXACT.contains(&name.as_str())
+        || SUFFIXES
+            .iter()
+            .any(|s| name.ends_with(&format!("_{s}")) || name.ends_with(&format!("-{s}")))
 }
 
 /// Whether `name` is `Authorization` or `Proxy-Authorization`, whose values
@@ -183,7 +219,7 @@ fn redact(name: &str, v: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sensitive, redact, request_url};
+    use super::{is_secret_param, is_sensitive, redact, request_url};
 
     #[test]
     fn only_authorization_keeps_its_scheme() {
@@ -195,6 +231,31 @@ mod tests {
         assert_eq!(redact("Authorization", "raw-key"), "***");
         assert_eq!(redact("X-Session", "session abc"), "***");
         assert_eq!(redact("Cookie", "sid=1; Path=/"), "***");
+    }
+
+    #[test]
+    fn only_credential_query_names_are_secret_params() {
+        for n in [
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "token",
+            "api_key",
+            "apikey",
+            "key",
+            "password",
+            "client_secret",
+            "secret",
+            "sig",
+            "Signature",
+            "X-Api-Key",
+        ] {
+            assert!(is_secret_param(n), "{n}");
+        }
+
+        for n in ["q", "keyword", "author", "monkey", "page", "tokens_left"] {
+            assert!(!is_secret_param(n), "{n}");
+        }
     }
 
     #[test]
