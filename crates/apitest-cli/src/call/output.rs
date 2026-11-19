@@ -1,5 +1,6 @@
 //! What `apitest call` writes: the response on stdout, the `-v` summary on stderr.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Write as _};
 
@@ -11,8 +12,8 @@ use apitest::runner::RunConfig;
 
 use super::actor::credential_headers;
 
-/// Writes the body to stdout, after `HTTP <status>` and the response headers
-/// with `-i`. A reader that stops early (`| head`) is fine.
+/// Writes the body to stdout as received, after `HTTP <status>` and the
+/// response headers with `-i`. A reader that stops early (`| head`) is fine.
 ///
 /// Secrets and redaction patterns are masked here too: a token endpoint's
 /// answer must not end up in a terminal or CI log.
@@ -39,8 +40,20 @@ fn write_to_stdout(resp: &Response, include: bool, redactor: &Redactor) -> std::
         write!(out, "\r\n")?;
     }
 
-    out.write_all(redactor.redact(&resp.text).as_bytes())?;
+    out.write_all(&masked_body(resp, redactor))?;
     out.flush()
+}
+
+/// The body to write: the bytes as received, so binary downloads stay intact,
+/// unless a secret or redaction pattern matches it. Then it is the masked text,
+/// and a binary body that holds a secret loses its exact bytes.
+fn masked_body<'a>(resp: &'a Response, redactor: &Redactor) -> Cow<'a, [u8]> {
+    let masked = redactor.redact(&resp.text);
+    if masked == resp.text {
+        Cow::Borrowed(&resp.bytes)
+    } else {
+        Cow::Owned(masked.into_bytes())
+    }
 }
 
 /// Request and response lines for `--verbose`, with credential values redacted:

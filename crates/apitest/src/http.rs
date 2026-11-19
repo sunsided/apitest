@@ -19,6 +19,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -91,8 +92,12 @@ pub struct Response {
     pub headers: BTreeMap<String, String>,
     /// Parsed JSON body, or the body as a string if it was not JSON (`null` when empty).
     pub body: Value,
-    /// The body as received, before JSON parsing.
+    /// The body as text, before JSON parsing: decoded with the `Content-Type`
+    /// charset (UTF-8 by default), invalid sequences replaced with `U+FFFD`.
     pub text: String,
+    /// The body exactly as received, for binary or non-UTF-8 content. Not serialized.
+    #[serde(skip)]
+    pub bytes: Bytes,
     /// Time from sending the request until the whole body arrived, in milliseconds.
     pub elapsed_ms: f64,
     /// `contract:operationId` for contract calls.
@@ -694,8 +699,8 @@ fn scalar(v: &Value) -> String {
     }
 }
 
-/// Status, headers and body text of one received response.
-type Received = (u16, BTreeMap<String, String>, String);
+/// Status, headers and raw body of one received response.
+type Received = (u16, BTreeMap<String, String>, Bytes);
 
 impl Ctx {
     /// A raw (non-contract) request.
@@ -794,12 +799,14 @@ impl Ctx {
         #[cfg(feature = "load")]
         self.record_metrics(&result, elapsed);
 
-        let (status, headers, text) = result.with_context(|| format!("{method} {url} failed"))?;
+        let (status, headers, bytes) = result.with_context(|| format!("{method} {url} failed"))?;
+        let text = decode_text(headers.get("content-type").map(String::as_str), &bytes);
         let response = Response {
             status,
             headers,
             body: parse_body(&text),
             text,
+            bytes,
             elapsed_ms: elapsed.as_secs_f64() * 1000.0,
             operation: op.as_ref().map(|(c, id)| format!("{}:{id}", c.name)),
             request: sent,
@@ -978,9 +985,26 @@ async fn fetch(req: reqwest::RequestBuilder) -> reqwest::Result<Received> {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let text = r.text().await?;
+    let bytes = r.bytes().await?;
 
-    Ok((status, headers, text))
+    Ok((status, headers, bytes))
+}
+
+/// Decodes a body like `reqwest::Response::text` does: with the `charset` of
+/// `content_type` (UTF-8 if absent or unknown), BOM sniffed and stripped,
+/// invalid sequences replaced.
+fn decode_text(content_type: Option<&str>, bytes: &[u8]) -> String {
+    let charset = content_type
+        .into_iter()
+        .flat_map(|ct| ct.split(';').skip(1))
+        .filter_map(|param| param.split_once('='))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case("charset"))
+        .map(|(_, v)| v.trim().trim_matches('"'));
+    let encoding = charset
+        .and_then(|c| encoding_rs::Encoding::for_label(c.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+
+    encoding.decode(bytes).0.into_owned()
 }
 
 /// The body as JSON, as a JSON string if it is not JSON, or `null` if empty.
@@ -1011,4 +1035,28 @@ fn encode_segment(s: &str) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_text;
+
+    #[test]
+    fn text_is_decoded_with_the_declared_charset() {
+        let latin1 = b"Gr\xfc\xdfe";
+        assert_eq!(
+            decode_text(Some("text/plain; charset=ISO-8859-1"), latin1),
+            "Grüße"
+        );
+        assert_eq!(
+            decode_text(Some("text/plain;charset=\"latin1\""), latin1),
+            "Grüße"
+        );
+        assert_eq!(decode_text(None, latin1), "Gr\u{fffd}\u{fffd}e");
+        assert_eq!(
+            decode_text(Some("application/json"), "\u{feff}{}".as_bytes()),
+            "{}"
+        );
+        assert_eq!(decode_text(Some("text/plain; charset=nope"), b"ok"), "ok");
+    }
 }

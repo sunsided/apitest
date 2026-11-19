@@ -67,6 +67,14 @@ async fn status(Path(n): Path<u16>) -> StatusCode {
     StatusCode::from_u16(n).unwrap()
 }
 
+/// Bytes that are not valid UTF-8 in any position, for binary downloads.
+const BINARY: &[u8] = &[0x89, b'P', b'N', b'G', 0x00, 0xff, 0xfe, 0xc3, 0x28];
+
+/// `GET /binary`: [`BINARY`] as `application/octet-stream`.
+async fn binary() -> impl IntoResponse {
+    ([("content-type", "application/octet-stream")], BINARY)
+}
+
 /// `GET /hop`: a same-origin redirect to `/status/204`.
 async fn hop() -> Redirect {
     Redirect::to("/status/204")
@@ -82,6 +90,7 @@ fn app(away: &str) -> Router {
         .route("/status/{n}", get(status))
         .route("/slow", get(slow))
         .route("/hop", get(hop))
+        .route("/binary", get(binary))
         .route("/away", get(move || async move { Redirect::to(&away) }))
 }
 
@@ -541,4 +550,21 @@ fn cross_origin_redirects_are_not_followed() {
     );
     // The other host is never contacted, so it never sees the API key.
     assert!(seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn binary_bodies_are_written_byte_for_byte() {
+    let dir = project(&serve(), "");
+    let o = apitest(&dir, &["hub", "GET", "/binary"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(o.stdout, BINARY);
+
+    // A redaction pattern still applies; the body then loses its exact bytes.
+    let o = apitest(&dir, &["hub", "GET", "/binary", "--redact", "PNG"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("***") && !stdout(&o).contains("PNG"),
+        "{}",
+        stdout(&o)
+    );
 }
