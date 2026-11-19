@@ -11,6 +11,7 @@ use apitest::auth::{ActorConfig, Auth, LoginFlow};
 use apitest::runner::RunConfig;
 
 /// Checks that actor `name` may send to `service` with the given `-H` headers.
+/// `source` names the config file in messages.
 ///
 /// # Errors
 ///
@@ -21,24 +22,32 @@ pub fn check(
     name: &str,
     service: &str,
     headers: &[(String, String)],
+    source: &str,
 ) -> Result<()> {
-    let actor = find(cfg, name)?;
+    let actor = find(cfg, name, source)?;
     check_service(actor, name, service)?;
     check_headers(cfg, actor, name, headers)?;
-    if let Auth::Login {
-        service: login_service,
-        username,
-        ..
-    } = &actor.auth
-    {
-        let login_service = login_service
-            .as_deref()
-            .or(actor.service.as_deref())
-            .unwrap_or(service);
-        check_login(cfg, name, username, login_service)?;
+    if let Auth::Login { username, .. } = &actor.auth {
+        let Some(login_service) = login_service(actor) else {
+            bail!(
+                "actor '{name}' logs in as '{username}', but names no service to log in on\n\
+                 help: set `service: {service}` on the actor (or under its `auth:`) in {source}"
+            );
+        };
+        check_login(cfg, name, username, login_service, source)?;
     }
 
     Ok(())
+}
+
+/// The service a login actor logs in on: its `auth.service`, else its own
+/// `service`. This is the library's resolution when it sends, so a check that
+/// passes here can't fail there; there is no fallback to the target service.
+fn login_service(actor: &ActorConfig) -> Option<&str> {
+    match &actor.auth {
+        Auth::Login { service, .. } => service.as_deref().or(actor.service.as_deref()),
+        _ => None,
+    }
 }
 
 /// The headers an actor's credentials end up in: `Authorization`, an API-key
@@ -53,12 +62,8 @@ pub fn credential_headers(cfg: &RunConfig, actor: &ActorConfig) -> Vec<String> {
     let mut h = vec!["Authorization".to_string()];
     match &actor.auth {
         Auth::Header { name, .. } => h.push(name.clone()),
-        Auth::Login { service, .. } => {
-            if let Some(flow) = service
-                .as_ref()
-                .or(actor.service.as_ref())
-                .and_then(|s| cfg.auth.get(s))
-            {
+        Auth::Login { .. } => {
+            if let Some(flow) = login_service(actor).and_then(|s| cfg.auth.get(s)) {
                 h.push(flow.header.clone());
             }
         }
@@ -68,17 +73,17 @@ pub fn credential_headers(cfg: &RunConfig, actor: &ActorConfig) -> Vec<String> {
     h
 }
 
-/// Looks up actor `name` under `actors:`.
+/// Looks up actor `name` under `actors:` of `source`.
 ///
 /// # Errors
 ///
 /// Fails when there is no such actor, listing the configured ones.
-fn find<'a>(cfg: &'a RunConfig, name: &str) -> Result<&'a ActorConfig> {
+fn find<'a>(cfg: &'a RunConfig, name: &str, source: &str) -> Result<&'a ActorConfig> {
     cfg.actors.get(name).ok_or_else(|| {
         let known: Vec<&str> = cfg.actors.keys().map(String::as_str).collect();
         anyhow!(
             "no actor named '{name}' is configured (known: {})\n\
-             help: add it under `actors:` in apitest.nova",
+             help: add it under `actors:` in {source}",
             if known.is_empty() {
                 "none".into()
             } else {
@@ -104,7 +109,10 @@ fn check_service(actor: &ActorConfig, name: &str, service: &str) -> Result<()> {
 }
 
 /// Refuses a `-H` for a header the actor sets (its credentials, `headers:` or
-/// `user_agent:`), which would otherwise silently replace the actor's value.
+/// `user_agent:`): the two would conflict, and depending on the header one of
+/// them would be dropped without a word (an `Authorization` replaces the
+/// actor's credentials, while an API-key or login-flow header is overwritten
+/// by them).
 ///
 /// # Errors
 ///
@@ -134,29 +142,39 @@ fn check_headers(
 }
 
 /// Checks that actor `name` (logging in as `username`) can log in on
-/// `login_service`: a listed service with a login flow that has a relative `path`.
+/// `login_service`: a listed service with a usable URL and a login flow that
+/// has a relative `path`. `source` names the config file in messages.
 ///
 /// # Errors
 ///
 /// Fails when the flow is missing, has no `path` or an absolute one, or the
-/// login service is not listed under `services:`.
-fn check_login(cfg: &RunConfig, name: &str, username: &str, login_service: &str) -> Result<()> {
+/// login service is not listed under `services:` or has an unusable URL.
+fn check_login(
+    cfg: &RunConfig,
+    name: &str,
+    username: &str,
+    login_service: &str,
+    source: &str,
+) -> Result<()> {
     let flow = cfg.auth.get(login_service).ok_or_else(|| {
         anyhow!(
             "actor '{name}' logs in as '{username}' on '{login_service}', but there is no \
              login flow for '{login_service}'\n\
              help: `apitest call` has no OpenAPI spec and doesn't guess a login endpoint; \
-             configure it in apitest.nova, e.g.\n  auth:\n    {login_service}:\n      \
+             configure it in {source}, e.g.\n  auth:\n    {login_service}:\n      \
              path: /login\n      body:\n        username: \"{{username}}\"\n        \
              password: \"{{password}}\"\n      token: /token"
         )
     })?;
     check_login_path(flow, login_service)?;
-    if !cfg.services.contains_key(login_service) {
-        bail!("actor '{name}' logs in on '{login_service}', which is not listed under `services:`");
-    }
+    let Some(url) = cfg.services.get(login_service) else {
+        bail!(
+            "actor '{name}' logs in on '{login_service}', which is not listed under `services:` \
+             in {source}"
+        );
+    };
 
-    Ok(())
+    super::target::check_service_url(login_service, url, source)
 }
 
 /// Requires a relative `path` on the login flow: an `operation` can't be
@@ -207,7 +225,45 @@ mod tests {
 
     /// The error message of a check that must fail.
     fn err(cfg: &RunConfig, actor: &str, service: &str, headers: &[(String, String)]) -> String {
-        check(cfg, actor, service, headers).unwrap_err().to_string()
+        check(cfg, actor, service, headers, "apitest.nova")
+            .unwrap_err()
+            .to_string()
+    }
+
+    /// Whether the check passes.
+    fn passes(cfg: &RunConfig, actor: &str, service: &str, headers: &[(String, String)]) -> bool {
+        check(cfg, actor, service, headers, "apitest.nova").is_ok()
+    }
+
+    #[test]
+    fn a_login_actor_without_any_service_is_refused_not_guessed() {
+        let mut c = cfg().login_flow("hub", LoginFlow::path("/login"));
+        c.actors.insert(
+            "admin".into(),
+            ActorConfig {
+                auth: Auth::Login {
+                    service: None,
+                    username: "u".into(),
+                    password: "p".into(),
+                },
+                ..Default::default()
+            },
+        );
+        let e = err(&c, "admin", "hub", &[]);
+        assert!(e.contains("names no service to log in on"), "{e}");
+        assert!(e.contains("set `service: hub`"), "{e}");
+        assert_eq!(
+            credential_headers(&c, &c.actors["admin"]),
+            ["Authorization"]
+        );
+    }
+
+    #[test]
+    fn messages_name_the_config_file_in_use() {
+        let e = check(&cfg(), "nobody", "hub", &[], "other.nova")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("under `actors:` in other.nova"), "{e}");
     }
 
     #[test]
@@ -225,7 +281,7 @@ mod tests {
         assert!(e.contains("operation: signIn"), "{e}");
 
         let c = cfg().login_flow("hub", LoginFlow::path("/login"));
-        check(&c, "hub_admin", "hub", &[]).unwrap();
+        assert!(passes(&c, "hub_admin", "hub", &[]));
     }
 
     #[test]
@@ -261,14 +317,19 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(check(&c, "monitor", "hub", &h("x-api-key", "other")).is_err());
-        assert!(check(&c, "monitor", "hub", &h("Authorization", "Bearer x")).is_err());
-        check(&c, "monitor", "hub", &h("X-Tenant", "42")).unwrap();
+        assert!(!passes(&c, "monitor", "hub", &h("x-api-key", "other")));
+        assert!(!passes(
+            &c,
+            "monitor",
+            "hub",
+            &h("Authorization", "Bearer x")
+        ));
+        assert!(passes(&c, "monitor", "hub", &h("X-Tenant", "42")));
 
         // The actor's `user_agent` counts as a header it sets.
-        check(&c, "monitor", "hub", &h("User-Agent", "mine")).unwrap();
+        assert!(passes(&c, "monitor", "hub", &h("User-Agent", "mine")));
         c.actors.get_mut("monitor").unwrap().user_agent = Some("synthetic/1.0".into());
-        assert!(check(&c, "monitor", "hub", &h("user-agent", "mine")).is_err());
+        assert!(!passes(&c, "monitor", "hub", &h("user-agent", "mine")));
     }
 
     #[test]
@@ -277,7 +338,7 @@ mod tests {
         flow.header = "X-Session".into();
         flow.scheme = None;
         let c = cfg().login_flow("hub", flow);
-        assert!(check(&c, "hub_admin", "hub", &h("x-session", "mine")).is_err());
+        assert!(!passes(&c, "hub_admin", "hub", &h("x-session", "mine")));
         assert!(credential_headers(&c, &c.actors["hub_admin"]).contains(&"X-Session".to_string()));
     }
 
@@ -291,7 +352,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        check(&c, "tenant42", "hub", &h("Authorization", "Bearer x")).unwrap();
+        assert!(passes(
+            &c,
+            "tenant42",
+            "hub",
+            &h("Authorization", "Bearer x")
+        ));
 
         // ... unless the actor sets it through `headers:`.
         c.actors

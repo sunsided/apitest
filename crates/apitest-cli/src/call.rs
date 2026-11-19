@@ -8,7 +8,8 @@
 //!
 //! Nothing is guessed. The service must be listed under `services:`, the actor
 //! under `actors:`, and an actor that logs in needs an explicit login flow with
-//! a `path` under `auth:`. Without `--as` the request carries no credentials.
+//! a `path` under `auth:`. Without `--as` no credentials come from the config,
+//! only what `-H` passes.
 //!
 //! ```mermaid
 //! flowchart LR
@@ -133,7 +134,7 @@ pub async fn call(a: Args, redactor: &Redactor) -> Result<bool> {
     target::check_request(&a.method, &a.path)?;
     target::check_service(&cfg, &a.service, &source)?;
     if let Some(name) = &a.actor {
-        actor::check(&cfg, name, &a.service, &a.header)?;
+        actor::check(&cfg, name, &a.service, &a.header, &source)?;
     }
 
     // Only the actor this call uses must resolve: an unrelated actor's missing
