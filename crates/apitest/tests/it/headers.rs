@@ -1,8 +1,12 @@
 //! Trace propagation, User-Agent precedence and authentication.
+//!
+//! The tests live here so their ids stay `headers::<test>`; the service under test and the
+//! probing helpers are submodules.
+
+mod probe;
+mod service;
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apitest::Response;
@@ -10,144 +14,20 @@ use apitest::prelude::*;
 use apitest::report::Outcome;
 use apitest::script::rhai::load_str as rhai_suites;
 use apitest::trace::SpanContext;
-use axum::extract::{Form, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response as AxumResponse};
-use axum::routing::{get, post};
-use axum::{Json, Router};
 
-// ------------------------------------------------------------------- service
+use probe::{Probe, echo_record, futures_join};
+use service::{start, stats};
 
-#[derive(Default)]
-struct Svc {
-    tokens: Mutex<HashSet<String>>,
-    logins: AtomicU64,
-    cc_tokens: AtomicU64,
-}
-
-fn headers_json(h: &HeaderMap) -> Value {
-    let m: BTreeMap<String, String> = h
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                v.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect();
-    json!(m)
-}
-
-async fn echo(h: HeaderMap) -> Json<Value> {
-    Json(headers_json(&h))
-}
-
-async fn login(State(s): State<Arc<Svc>>, Json(b): Json<Value>) -> AxumResponse {
-    // Slow on purpose, so concurrent first requests really race for the login.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    if b["password"] != "pw" {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "bad credentials" })),
-        )
-            .into_response();
-    }
-    let n = s.logins.fetch_add(1, Ordering::SeqCst) + 1;
-    let token = format!("tok-{}-{n}", b["username"].as_str().unwrap_or("?"));
-    s.tokens.lock().unwrap().insert(token.clone());
-    Json(json!({ "token": token })).into_response()
-}
-
-async fn me(State(s): State<Arc<Svc>>, h: HeaderMap) -> AxumResponse {
-    let token = h
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if s.tokens.lock().unwrap().contains(token) {
-        Json(json!({ "token": token })).into_response()
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid token" })),
-        )
-            .into_response()
-    }
-}
-
-async fn revoke_all(State(s): State<Arc<Svc>>) -> StatusCode {
-    s.tokens.lock().unwrap().clear();
-    StatusCode::NO_CONTENT
-}
-
-async fn oauth(State(s): State<Arc<Svc>>, Form(f): Form<BTreeMap<String, String>>) -> AxumResponse {
-    if f.get("grant_type").map(String::as_str) != Some("client_credentials")
-        || f.get("client_id").map(String::as_str) != Some("svc")
-        || f.get("client_secret").map(String::as_str) != Some("s3cret")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid_client" })),
-        )
-            .into_response();
-    }
-    let n = s.cc_tokens.fetch_add(1, Ordering::SeqCst) + 1;
-    let token = format!("cc-{n}");
-    s.tokens.lock().unwrap().insert(token.clone());
-    Json(json!({ "access_token": token, "token_type": "bearer", "expires_in": 3, "scope": f.get("scope") })).into_response()
-}
-
-async fn stats_handler(State(s): State<Arc<Svc>>) -> Json<Value> {
-    Json(
-        json!({ "logins": s.logins.load(Ordering::SeqCst), "cc_tokens": s.cc_tokens.load(Ordering::SeqCst) }),
-    )
-}
-
-async fn start() -> (TestServer, Arc<Svc>) {
-    let svc = Arc::new(Svc::default());
-    let app = Router::new()
-        .route("/echo", get(echo))
-        .route("/login", post(login))
-        .route("/me", get(me))
-        .route("/revoke-all", post(revoke_all))
-        .route("/oauth/token", post(oauth))
-        .route("/stats", get(stats_handler))
-        .with_state(svc.clone());
-    (TestServer::axum(app).await.unwrap(), svc)
-}
-
+/// A quiet run config with the service registered as `svc` and as the default base URL.
 fn cfg(srv: &TestServer) -> RunConfig {
     RunConfig::new(srv.base_url())
         .service("svc", srv.base_url())
         .quiet(true)
 }
 
-/// Collects values from inside tests for assertions afterwards.
-#[derive(Clone, Default)]
-struct Probe(Arc<Mutex<Vec<Value>>>);
-impl Probe {
-    fn push(&self, v: Value) {
-        self.0.lock().unwrap().push(v);
-    }
-    fn all(&self) -> Vec<Value> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
-async fn echo_record(probe: &Probe, label: &str) -> Result<()> {
-    let resp = Actor::on("svc").get("/echo").expect(200).await?;
-    probe.push(json!({
-        "label": label,
-        "received": resp.body,
-        "sent": resp.request.headers,
-        "span": resp.trace,
-        "test_trace": current_trace()?.trace_id,
-    }));
-    Ok(())
-}
-
-// ------------------------------------------------------------------- tracing
-
+/// Every request carries a sampled W3C `traceparent` with a fresh span; requests of one
+/// test share a trace, different tests get different traces, and the default User-Agent
+/// names the crate version.
 #[tokio::test(flavor = "multi_thread")]
 async fn w3c_traceparent_by_default_one_trace_per_test() {
     let (srv, _) = start().await;
@@ -203,6 +83,8 @@ async fn w3c_traceparent_by_default_one_trace_per_test() {
     );
 }
 
+/// With every propagation format enabled, B3, X-Ray, GCP and Datadog headers all encode
+/// the same trace and span ids, next to `tracestate` and `baggage`.
 #[tokio::test(flavor = "multi_thread")]
 async fn all_formats_carry_the_same_ids() {
     let (srv, _) = start().await;
@@ -230,30 +112,36 @@ async fn all_formats_carry_the_same_ids() {
     run_suite(&suite, &c).await.assert_passed();
     let r = &probe.all()[0]["received"];
     let span: SpanContext = serde_json::from_value(probe.all()[0]["span"].clone()).unwrap();
-    let (t, s) = (&span.trace_id, &span.span_id);
+    let (trace, span_id) = (&span.trace_id, &span.span_id);
     assert_eq!(r["tracestate"], "apitest=1");
     assert_eq!(
         r["baggage"],
         "apitest.suite=formats,apitest.test=all,env=ci"
     );
-    assert_eq!(r["b3"], format!("{t}-{s}-1"));
-    assert_eq!(r["x-b3-traceid"], *t);
-    assert_eq!(r["x-b3-spanid"], *s);
+    assert_eq!(r["b3"], format!("{trace}-{span_id}-1"));
+    assert_eq!(r["x-b3-traceid"], *trace);
+    assert_eq!(r["x-b3-spanid"], *span_id);
     assert_eq!(
         r["x-amzn-trace-id"],
-        format!("Root=1-{}-{};Parent={s};Sampled=1", &t[..8], &t[8..])
+        format!(
+            "Root=1-{}-{};Parent={span_id};Sampled=1",
+            &trace[..8],
+            &trace[8..]
+        )
     );
     assert_eq!(
         r["x-cloud-trace-context"],
-        format!("{t}/{};o=1", u64::from_str_radix(s, 16).unwrap())
+        format!("{trace}/{};o=1", u64::from_str_radix(span_id, 16).unwrap())
     );
     assert_eq!(
         r["x-datadog-trace-id"],
-        u64::from_str_radix(&t[16..], 16).unwrap().to_string()
+        u64::from_str_radix(&trace[16..], 16).unwrap().to_string()
     );
-    assert_eq!(r["x-datadog-tags"], format!("_dd.p.tid={}", &t[..16]));
+    assert_eq!(r["x-datadog-tags"], format!("_dd.p.tid={}", &trace[..16]));
 }
 
+/// Tracing can be switched off globally, per suite and per request, `trace(true)` forces
+/// it on, and an explicit `traceparent` header is never replaced.
 #[tokio::test(flavor = "multi_thread")]
 async fn tracing_is_opt_out_at_every_level() {
     let (srv, _) = start().await;
@@ -308,6 +196,7 @@ async fn tracing_is_opt_out_at_every_level() {
     }
 }
 
+/// A configured parent trace is inherited: same trace id, own span id.
 #[tokio::test(flavor = "multi_thread")]
 async fn runs_inside_a_parent_trace() {
     let (srv, _) = start().await;
@@ -329,8 +218,7 @@ async fn runs_inside_a_parent_trace() {
     assert_ne!(tp.span_id, "00f067aa0ba902b7", "but sends its own span");
 }
 
-// ---------------------------------------------------------------- user agent
-
+/// User-Agent precedence: request beats actor beats scope beats suite beats global.
 #[tokio::test(flavor = "multi_thread")]
 async fn user_agent_precedence() {
     let (srv, _) = start().await;
@@ -383,8 +271,8 @@ async fn user_agent_precedence() {
     );
 }
 
-// ---------------------------------------------------------------------- auth
-
+/// Bearer, Basic and API-key credentials are sent as configured; an actor's credentials
+/// beat the scope's, and an explicit `Authorization` header beats both.
 #[tokio::test(flavor = "multi_thread")]
 async fn static_credentials_and_precedence() {
     let (srv, _) = start().await;
@@ -444,15 +332,8 @@ async fn static_credentials_and_precedence() {
     );
 }
 
-async fn stats(srv: &TestServer) -> Value {
-    reqwest::get(format!("{}/stats", srv.base_url()))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
+/// A login actor logs in once for ten concurrent first requests and logs in again,
+/// transparently, after the service rejects its token with `401`.
 #[tokio::test(flavor = "multi_thread")]
 async fn lazy_login_is_cached_single_flight_and_retried_on_401() {
     let (srv, _) = start().await;
@@ -477,24 +358,7 @@ async fn lazy_login_is_cached_single_flight_and_retried_on_401() {
     assert_eq!(stats(&srv).await["logins"], 2);
 }
 
-/// Minimal `join_all` without pulling in the futures crate.
-async fn futures_join<F: std::future::IntoFuture>(fs: impl IntoIterator<Item = F>) -> Vec<F::Output>
-where
-    F::IntoFuture: Send + 'static,
-    F::Output: Send + 'static,
-{
-    let cx = apitest::current().unwrap();
-    let handles: Vec<_> = fs
-        .into_iter()
-        .map(|f| tokio::spawn(cx.enter(f.into_future())))
-        .collect();
-    let mut out = vec![];
-    for h in handles {
-        out.push(h.await.unwrap());
-    }
-    out
-}
-
+/// A failed login names the user, the service and the service's error message.
 #[tokio::test(flavor = "multi_thread")]
 async fn login_failures_say_who_and_where() {
     let (srv, _) = start().await;
@@ -520,6 +384,7 @@ async fn login_failures_say_who_and_where() {
     assert!(message.contains("bad credentials"), "{message}");
 }
 
+/// A client-credentials token is reused until shortly before it expires, then refreshed.
 #[tokio::test(flavor = "multi_thread")]
 async fn client_credentials_are_cached_until_shortly_before_expiry() {
     let (srv, _) = start().await;
@@ -542,6 +407,8 @@ async fn client_credentials_are_cached_until_shortly_before_expiry() {
     assert_eq!(stats(&srv).await["cc_tokens"], 2);
 }
 
+/// Actors named in the run config, with credentials from variables, work from Rust, JS
+/// and Rhai suites; scripts also see the request trace and can set credentials.
 #[tokio::test(flavor = "multi_thread")]
 async fn named_actors_from_config_with_variables() {
     let (srv, _) = start().await;
