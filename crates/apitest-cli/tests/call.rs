@@ -304,15 +304,30 @@ fn env_file_errors_and_secrets_never_reach_the_terminal() {
     assert!(err.contains("parsing") && err.contains(".env"), "{err}");
     assert!(!err.contains("hunter2"), "{err}");
 
-    // A wrong password: the login error quotes nothing it was given.
+    // A wrong password: the final error is masked too, here the login
+    // response body "bad credentials" through a pattern.
     std::fs::write(
         dir.join(".env"),
         "HUB_USER=admin@hub.test\nHUB_PASSWORD=wrong-pass\n",
     )
     .unwrap();
-    let o = apitest(&dir, &["hub", "GET", "/me", "--as", "hub_admin", "-v"]);
+    let args = [
+        "hub",
+        "GET",
+        "/me",
+        "--as",
+        "hub_admin",
+        "--redact",
+        "cred[a-z]+",
+    ];
+    let o = apitest(&dir, &args);
     assert_eq!(o.status.code(), Some(2));
-    assert!(!stderr(&o).contains("wrong-pass"), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("status 401: bad ***"), "{err}");
+    assert!(
+        !err.contains("credentials") && !err.contains("wrong-pass"),
+        "{err}"
+    );
 }
 
 #[test]
