@@ -63,6 +63,8 @@ pub(crate) fn from_nova<T: serde::de::DeserializeOwned>(
 #[serde(transparent)]
 pub struct NovaDuration(#[serde(with = "novafile_serde::with::duration")] pub Duration);
 
+/// Where to write machine-readable reports (`reports:`). Relative paths
+/// resolve against [`ProjectConfig::root`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Reports {
@@ -72,18 +74,28 @@ pub struct Reports {
     pub json: Option<PathBuf>,
 }
 
+/// The contents of `apitest.nova`. Every field is optional; unset fields keep
+/// the [`RunConfig`] defaults when applied with [`ProjectConfig::apply`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectConfig {
+    /// Base URL requests go to when no named service applies.
     pub base_url: Option<String>,
     /// Named services (`hub`, `app`, `mail`, ...) → base URL.
     pub services: BTreeMap<String, String>,
+    /// Lockfile path, relative to [`ProjectConfig::root`] unless absolute.
     pub lockfile: Option<PathBuf>,
+    /// Maximum number of tests running at the same time.
     pub max_parallel: Option<usize>,
+    /// Time limit for one test.
     pub test_timeout: Option<NovaDuration>,
+    /// Time limit for one fixture setup or teardown hook.
     pub hook_timeout: Option<NovaDuration>,
+    /// Variables available to suites; merged over the run's variables.
     pub vars: BTreeMap<String, String>,
+    /// Script suite files to run, relative to [`ProjectConfig::root`].
     pub suites: Vec<PathBuf>,
+    /// Report outputs.
     pub reports: Reports,
     /// JS runtimes per suite for functional runs (load runs use one per VU).
     pub js_workers: Option<usize>,
@@ -101,6 +113,12 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
+    /// Reads and parses the config file at `path` and sets
+    /// [`ProjectConfig::root`] to its directory.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be read or does not match [`CONFIG_SCHEMA`].
     pub fn load(path: &Path) -> Result<ProjectConfig> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
@@ -112,11 +130,21 @@ impl ProjectConfig {
     /// Parses `apitest.nova` source text and validates it against [`CONFIG_SCHEMA`].
     /// `what` names the source in error messages. Relative paths resolve against
     /// the current directory until [`ProjectConfig::root`] is set.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `text` is not valid NOVA or does not match the schema; the
+    /// message lists every issue with its path.
     pub fn parse(text: &str, what: &str) -> Result<ProjectConfig> {
         from_nova(text, CONFIG_SCHEMA, what)
     }
 
-    /// Looks for `apitest.nova` in `dir` and its parents.
+    /// Looks for `apitest.nova` in `dir` and its parents and loads the
+    /// nearest one. Returns `Ok(None)` when there is none up to the root.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a found file cannot be loaded (see [`ProjectConfig::load`]).
     pub fn discover(dir: &Path) -> Result<Option<ProjectConfig>> {
         let mut d = Some(dir);
         while let Some(dir) = d {
@@ -129,6 +157,8 @@ impl ProjectConfig {
         Ok(None)
     }
 
+    /// Resolves `p` against [`ProjectConfig::root`]; absolute paths are
+    /// returned unchanged.
     #[must_use]
     pub fn resolve(&self, p: &Path) -> PathBuf {
         if p.is_absolute() {
@@ -138,11 +168,13 @@ impl ProjectConfig {
         }
     }
 
-    /// Applies this config on top of `base`.
+    /// Applies this config on top of `base`. Set scalar fields replace the
+    /// base value; maps (`vars`, `services`, `auth`, `actors`) are merged, with
+    /// this config winning on equal keys.
     #[must_use]
     pub fn apply(&self, mut base: RunConfig) -> RunConfig {
         if let Some(u) = &self.base_url {
-            base.base_url = u.clone();
+            base.base_url.clone_from(u);
         }
         if let Some(l) = &self.lockfile {
             base.lockfile = Some(self.resolve(l));
@@ -159,7 +191,7 @@ impl ProjectConfig {
         base.vars.extend(self.vars.clone());
         base.services.extend(self.services.clone());
         if let Some(ua) = &self.user_agent {
-            base.user_agent = ua.clone();
+            base.user_agent.clone_from(ua);
         }
         if let Some(t) = &self.tracing {
             base.tracing = t.clone();

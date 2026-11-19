@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,6 +46,7 @@ pub enum TraceFormat {
 
 impl std::str::FromStr for TraceFormat {
     type Err = anyhow::Error;
+
     fn from_str(s: &str) -> Result<Self> {
         Ok(match s.to_ascii_lowercase().as_str() {
             "w3c" | "traceparent" | "otel" | "azure" => TraceFormat::W3c,
@@ -77,11 +79,18 @@ pub enum TraceScope {
 /// Run-wide tracing settings (`tracing:` in `apitest.nova`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags are independent public config keys deserialized from `tracing:`; an enum would not fit the file format"
+)]
 pub struct TracingConfig {
+    /// Whether trace headers are sent at all. On by default.
     pub enabled: bool,
+    /// Header formats to send; every format carries the same ids. Default: W3C only.
     pub formats: Vec<TraceFormat>,
     /// Sampled flag sent with every format (W3C flags `01` / `00`).
     pub sampled: bool,
+    /// How long one trace id lives.
     pub scope: TraceScope,
     /// W3C `tracestate` to send, e.g. `vendor=value`.
     pub tracestate: Option<String>,
@@ -116,6 +125,7 @@ impl Default for TracingConfig {
 }
 
 impl TracingConfig {
+    /// A config that sends no trace headers.
     #[must_use]
     pub fn disabled() -> Self {
         TracingConfig {
@@ -124,18 +134,25 @@ impl TracingConfig {
         }
     }
 
+    /// Replaces the header formats to send.
+    #[must_use]
     pub fn formats(mut self, formats: impl IntoIterator<Item = TraceFormat>) -> Self {
         self.formats = formats.into_iter().collect();
         self
     }
 
+    /// Sets how long one trace id lives.
     #[must_use]
     pub fn scope(mut self, scope: TraceScope) -> Self {
         self.scope = scope;
         self
     }
 
-    /// The effective parent context, if any (explicit `parent`, else `TRACEPARENT`).
+    /// The effective parent context, if any (explicit `parent`, else `TRACEPARENT`),
+    /// paired with the `tracestate` to send (explicit, else `TRACESTATE`). The
+    /// environment is only read with [`TracingConfig::inherit_env`].
+    ///
+    /// Fails when the parent is not a valid `traceparent`.
     pub(crate) fn resolved_parent(&self) -> Result<Option<(Traceparent, Option<String>)>> {
         let env = |k| {
             if self.inherit_env {
@@ -161,7 +178,9 @@ impl TracingConfig {
 pub struct TraceContext {
     /// 32 lowercase hex digits.
     pub trace_id: String,
+    /// Sampled flag sent with every span of this trace.
     pub sampled: bool,
+    /// W3C `tracestate` sent alongside `traceparent`.
     pub tracestate: Option<String>,
     /// The inherited parent span (from `TRACEPARENT`), if any.
     pub parent_span_id: Option<String>,
@@ -170,9 +189,11 @@ pub struct TraceContext {
 /// What was sent with one request: available as `resp.trace`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpanContext {
+    /// Id of the trace this span belongs to: 32 lowercase hex digits.
     pub trace_id: String,
     /// 16 lowercase hex digits, unique per request.
     pub span_id: String,
+    /// Sampled flag sent with this span.
     pub sampled: bool,
 }
 
@@ -192,19 +213,31 @@ impl SpanContext {
 /// A parsed W3C `traceparent` (useful for validating what a service echoes back).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Traceparent {
+    /// Version field, two lowercase hex digits (`00` today; `ff` is invalid).
     pub version: String,
+    /// Trace id, 32 lowercase hex digits, not all zero.
     pub trace_id: String,
+    /// Parent span id, 16 lowercase hex digits, not all zero.
     pub span_id: String,
+    /// Trace flags; bit 0 is the sampled flag.
     pub flags: u8,
 }
 
 impl Traceparent {
+    /// Whether the sampled flag (bit 0 of [`Traceparent::flags`]) is set.
     #[must_use]
     pub fn sampled(&self) -> bool {
         self.flags & 1 == 1
     }
 
     /// Parses and validates `00-<32 hex>-<16 hex>-<2 hex>` per W3C Trace Context.
+    /// Versions above `00` may carry extra trailing fields, which are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a field has the wrong length or is not lowercase hex, the
+    /// version is `ff`, a version `00` value has extra fields, or the trace or
+    /// span id is all zeros.
     pub fn parse(s: &str) -> Result<Traceparent> {
         let parts: Vec<&str> = s.trim().split('-').collect();
         let hex = |p: &str, n: usize| {
@@ -213,21 +246,26 @@ impl Traceparent {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
         match parts.as_slice() {
-            [v, t, p, f, ..] if hex(v, 2) && hex(t, 32) && hex(p, 16) && hex(f, 2) => {
-                if *v == "ff" {
+            [version, trace, span, flags, ..]
+                if hex(version, 2) && hex(trace, 32) && hex(span, 16) && hex(flags, 2) =>
+            {
+                if *version == "ff" {
                     bail!("version ff is invalid");
                 }
-                if *v == "00" && parts.len() != 4 {
+
+                if *version == "00" && parts.len() != 4 {
                     bail!("version 00 has exactly four fields");
                 }
-                if t.bytes().all(|b| b == b'0') || p.bytes().all(|b| b == b'0') {
+
+                if trace.bytes().all(|b| b == b'0') || span.bytes().all(|b| b == b'0') {
                     bail!("all-zero trace or span id");
                 }
+
                 Ok(Traceparent {
-                    version: v.to_string(),
-                    trace_id: t.to_string(),
-                    span_id: p.to_string(),
-                    flags: u8::from_str_radix(f, 16)?,
+                    version: (*version).to_string(),
+                    trace_id: (*trace).to_string(),
+                    span_id: (*span).to_string(),
+                    flags: u8::from_str_radix(flags, 16)?,
                 })
             }
             _ => bail!("expected 00-<32 lowercase hex>-<16 lowercase hex>-<2 hex>"),
@@ -245,6 +283,8 @@ impl fmt::Display for Traceparent {
     }
 }
 
+/// Counter mixed into every [`random_u64`] call, so two calls never hash the
+/// same input even if the hasher keys were to repeat.
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// 64 random bits, never zero. `RandomState` is seeded from OS randomness; good
@@ -260,6 +300,12 @@ fn random_u64() -> u64 {
     }
 }
 
+/// A fresh 128-bit trace id as 32 lowercase hex digits. The first 8 digits
+/// are the Unix time in seconds, which keeps the id a valid X-Ray root.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "X-Ray roots carry 32-bit epoch seconds (valid until 2106), and the middle 32 bits just take the low half of a random u64"
+)]
 pub(crate) fn new_trace_id() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -267,11 +313,16 @@ pub(crate) fn new_trace_id() -> String {
     format!("{secs:08x}{:08x}{:016x}", random_u64() as u32, random_u64())
 }
 
+/// A fresh 64-bit span id as 16 lowercase hex digits, never zero.
 pub(crate) fn new_span_id() -> String {
     format!("{:016x}", random_u64())
 }
 
 impl TraceContext {
+    /// Starts a trace. With a `parent` (a parsed `traceparent` and the
+    /// `tracestate` to send), the trace joins it: same trace id and sampled
+    /// flag, the parent's span as [`TraceContext::parent_span_id`]. Without
+    /// one, a new trace id is generated and `cfg` supplies the flags.
     pub(crate) fn fresh(
         cfg: &TracingConfig,
         parent: Option<&(Traceparent, Option<String>)>,
@@ -292,6 +343,7 @@ impl TraceContext {
         }
     }
 
+    /// A new span in this trace, with a fresh span id.
     pub(crate) fn span(&self) -> SpanContext {
         SpanContext {
             trace_id: self.trace_id.clone(),
@@ -301,6 +353,8 @@ impl TraceContext {
     }
 }
 
+/// Percent-encodes `s` for a W3C `baggage` key or value. Unreserved URL
+/// characters plus `/` and `:` stay as they are; every other byte becomes `%XX`.
 fn baggage_escape(s: &str) -> String {
     let mut o = String::new();
     for b in s.bytes() {
@@ -308,13 +362,19 @@ fn baggage_escape(s: &str) -> String {
             b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
                 o.push(b as char);
             }
-            _ => o.push_str(&format!("%{b:02X}")),
+            // Writing into a `String` cannot fail.
+            _ => {
+                let _ = write!(o, "%{b:02X}");
+            }
         }
     }
+
     o
 }
 
-/// The headers to send for one span.
+/// The headers to send for one span, in [`TracingConfig::formats`] order.
+/// `baggage` is the full W3C baggage (static plus per-test entries) and is
+/// only sent with [`TraceFormat::W3c`].
 pub(crate) fn headers(
     span: &SpanContext,
     trace: &TraceContext,
@@ -328,19 +388,7 @@ pub(crate) fn headers(
     let dec = |hex: &str| u64::from_str_radix(hex, 16).unwrap_or(0).to_string();
     for f in &cfg.formats {
         match f {
-            TraceFormat::W3c => {
-                out.push(("traceparent".into(), span.traceparent()));
-                if let Some(ts) = &trace.tracestate {
-                    out.push(("tracestate".into(), ts.clone()));
-                }
-                if !baggage.is_empty() {
-                    let v: Vec<String> = baggage
-                        .iter()
-                        .map(|(k, v)| format!("{}={}", baggage_escape(k), baggage_escape(v)))
-                        .collect();
-                    out.push(("baggage".into(), v.join(",")));
-                }
-            }
+            TraceFormat::W3c => w3c_headers(span, trace, baggage, &mut out),
             TraceFormat::B3 => out.push((
                 "b3".into(),
                 format!("{}-{}-{s01}", span.trace_id, span.span_id),
@@ -374,10 +422,33 @@ pub(crate) fn headers(
     out
 }
 
+/// Appends `traceparent`, plus `tracestate` and `baggage` when there is any.
+fn w3c_headers(
+    span: &SpanContext,
+    trace: &TraceContext,
+    baggage: &BTreeMap<String, String>,
+    out: &mut Vec<(String, String)>,
+) {
+    out.push(("traceparent".into(), span.traceparent()));
+    if let Some(ts) = &trace.tracestate {
+        out.push(("tracestate".into(), ts.clone()));
+    }
+
+    if !baggage.is_empty() {
+        let v: Vec<String> = baggage
+            .iter()
+            .map(|(k, v)| format!("{}={}", baggage_escape(k), baggage_escape(v)))
+            .collect();
+        out.push(("baggage".into(), v.join(",")));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A fixed, sampled span and its trace (with a `tracestate`), so header
+    /// values can be compared literally.
     fn span() -> (SpanContext, TraceContext) {
         let t = TraceContext {
             trace_id: "6750c1f2a1b2c3d4e5f60718293a4b5c".into(),

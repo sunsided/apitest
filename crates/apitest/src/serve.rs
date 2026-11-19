@@ -15,8 +15,11 @@ use tokio::task::JoinHandle;
 
 /// A running in-process server. Shuts down gracefully on [`TestServer::shutdown`] or drop.
 pub struct TestServer {
+    /// The bound address: 127.0.0.1 with an OS-assigned port.
     addr: SocketAddr,
+    /// Fires the shutdown signal; `None` once it has been sent.
     shutdown: Option<oneshot::Sender<()>>,
+    /// The task running the serve future; `None` once it has been awaited.
     task: Option<JoinHandle<Result<()>>>,
 }
 
@@ -33,6 +36,14 @@ impl TestServer {
     ///     Ok(())
     /// }).await?;
     /// ```
+    ///
+    /// The serve future runs on a spawned tokio task, so this must be called
+    /// inside a tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no port can be bound on 127.0.0.1. Errors from the serve
+    /// future itself surface from [`TestServer::shutdown`].
     pub async fn spawn<F, Fut>(serve: F) -> Result<TestServer>
     where
         F: FnOnce(TcpListener, ShutdownSignal) -> Fut,
@@ -55,6 +66,10 @@ impl TestServer {
     }
 
     /// Serves an axum `Router`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no port can be bound (see [`TestServer::spawn`]).
     #[cfg(feature = "axum")]
     pub async fn axum(router: axum::Router) -> Result<TestServer> {
         TestServer::spawn(|listener, shutdown| async move {
@@ -66,6 +81,7 @@ impl TestServer {
         .await
     }
 
+    /// The address the server listens on.
     #[must_use]
     pub fn addr(&self) -> SocketAddr {
         self.addr
@@ -78,10 +94,16 @@ impl TestServer {
     }
 
     /// Stops accepting connections and waits for in-flight requests to finish.
+    ///
+    /// # Errors
+    ///
+    /// Returns the serve future's error, or fails when the server task
+    /// panicked or was cancelled.
     pub async fn shutdown(mut self) -> Result<()> {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+
         match self.task.take() {
             Some(t) => t.await.context("server task panicked")?,
             None => Ok(()),

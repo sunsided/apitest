@@ -15,45 +15,71 @@ use serde_json::Value;
 use crate::context::{Ctx, Scope};
 use crate::suite::{BoxFut, Suite, TestOpts};
 
+/// One `#[apitest::test]` function, as emitted by the macro.
 #[doc(hidden)]
 pub struct TestDef {
+    /// `module_path!()` of the test, e.g. `my_crate::billing`.
     pub module: &'static str,
+    /// Name of the annotated function.
     pub fn_name: &'static str,
+    /// Display name from `name = "..."`; defaults to [`TestDef::fn_name`].
     pub name: Option<&'static str>,
+    /// Explicit suite key from `suite = "..."`; defaults to the module path.
     pub suite: Option<&'static str>,
+    /// Source file, for ordering tests within a suite.
     pub file: &'static str,
+    /// Source line, for ordering tests within a suite.
     pub line: u32,
+    /// Builds the test's options (concurrency, resource locks, timeout, tags).
     pub opts: fn() -> TestOpts,
+    /// Runs the test body.
     pub body: fn(Ctx) -> BoxFut<()>,
 }
 
+/// One `#[apitest::fixture]` function, as emitted by the macro.
 #[doc(hidden)]
 pub struct FixtureDef {
+    /// `module_path!()` of the fixture.
     pub module: &'static str,
+    /// Fixture name tests request it by.
     pub name: &'static str,
+    /// Explicit suite key from `suite = "..."`; defaults to the module path.
     pub suite: Option<&'static str>,
+    /// Scope name (`run`, `suite`, `vu`, `test`), parsed into a [`Scope`].
     pub scope: &'static str,
+    /// Source file, for ordering fixtures within a suite.
     pub file: &'static str,
+    /// Source line, for ordering fixtures within a suite.
     pub line: u32,
+    /// Produces the fixture value.
     pub setup: fn(Ctx) -> BoxFut<Value>,
+    /// Cleans up when the fixture's scope ends, if the fixture has a teardown.
     pub teardown: Option<fn(Ctx) -> BoxFut<()>>,
 }
 
+/// One `#[apitest::suite]` function, as emitted by the macro.
 #[doc(hidden)]
 pub struct SuiteDef {
+    /// `module_path!()` of the suite function.
     pub module: &'static str,
+    /// Explicit suite key from `suite = "..."`; defaults to the module path.
     pub suite: Option<&'static str>,
+    /// Builds the base suite (contracts, config) that registered tests and
+    /// fixtures with the same key are added to.
     pub build: fn() -> Result<Suite>,
 }
 
+/// Every `#[apitest::test]` linked into this binary.
 #[linkme::distributed_slice]
 #[doc(hidden)]
 pub static TESTS: [TestDef];
 
+/// Every `#[apitest::fixture]` linked into this binary.
 #[linkme::distributed_slice]
 #[doc(hidden)]
 pub static FIXTURES: [FixtureDef];
 
+/// Every `#[apitest::suite]` linked into this binary.
 #[linkme::distributed_slice]
 #[doc(hidden)]
 pub static SUITES: [SuiteDef];
@@ -63,6 +89,8 @@ fn relative_module(module: &str) -> &str {
     module.split_once("::").map_or(module, |(_, rest)| rest)
 }
 
+/// The suite an item belongs to: `explicit` if given, else its module path
+/// relative to the crate root.
 fn suite_key(module: &str, explicit: Option<&str>) -> String {
     explicit.map_or_else(|| relative_module(module).to_string(), str::to_string)
 }
@@ -76,7 +104,13 @@ fn test_id(module: &str, fn_name: &str) -> String {
     }
 }
 
-/// Builds one [`Suite`] per suite key from all registrations in this binary.
+/// Builds one [`Suite`] per suite key from all registrations in this binary,
+/// sorted by key.
+///
+/// # Errors
+///
+/// Fails when two `#[apitest::suite]` functions share a key, when a suite
+/// builder fails, or when a fixture names an unknown scope.
 pub fn collect() -> Result<Vec<Suite>> {
     let mut suites: BTreeMap<String, Suite> = BTreeMap::new();
 
@@ -87,6 +121,7 @@ pub fn collect() -> Result<Vec<Suite>> {
                 "suite '{key}' is declared twice with #[apitest::suite]"
             ));
         }
+
         let suite = (def.build)().map_err(|e| anyhow!("building suite '{key}': {e:#}"))?;
         suites.insert(key, suite);
     }

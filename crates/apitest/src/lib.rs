@@ -48,6 +48,7 @@ pub mod registry;
 #[cfg(feature = "macros")]
 pub use apitest_macros::{fixture, suite, test};
 
+/// Items the attribute macros' generated code refers to. Not public API.
 #[cfg(feature = "macros")]
 #[doc(hidden)]
 pub mod __private {
@@ -56,6 +57,7 @@ pub mod __private {
     pub use linkme;
     pub use serde_json;
 }
+
 #[cfg(feature = "load")]
 pub mod load;
 
