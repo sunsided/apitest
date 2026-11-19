@@ -30,11 +30,17 @@ impl TestServer {
     /// Framework-agnostic: you get a bound listener and a shutdown signal, and return
     /// the serve future. Works for axum, actix (via `from_std`), hyper, poem, ...
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use apitest::TestServer;
+    /// # async fn demo() -> anyhow::Result<()> {
+    /// # let app = axum::Router::new();
     /// let srv = TestServer::spawn(|listener, shutdown| async move {
-    ///     axum::serve(listener, app()).with_graceful_shutdown(shutdown).await?;
+    ///     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
     ///     Ok(())
-    /// }).await?;
+    /// })
+    /// .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// The serve future runs on a spawned tokio task, so this must be called

@@ -8,12 +8,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 
 [[bin]]
 name = "apitest"
 path = "src/main.rs"
+# The library docs live under the same name; the binary has no API to document.
+doc = false
 
 [dependencies]
 apitest = { workspace = true, features = ["rhai", "js", "load"] }

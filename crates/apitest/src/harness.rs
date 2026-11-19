@@ -8,14 +8,21 @@
 //! harness = false
 //! ```
 //!
-//! In `tests/api.rs`:
+//! In `tests/api.rs` (serve your app in-process with [`TestServer`](crate::TestServer)
+//! and hand it to [`Plan::keep`] so it lives until the run ends):
 //!
-//! ```ignore
+//! ```no_run
+//! use apitest::prelude::*;
+//!
 //! fn main() {
 //!     apitest::harness::main(|| async {
-//!         let server = apitest::TestServer::axum(my_app::router()).await?;
-//!         let cfg = apitest::RunConfig::new(server.base_url());
-//!         Ok(apitest::harness::Plan::new(cfg).suite(my_suite()?).keep(server))
+//!         let cfg = RunConfig::new("http://127.0.0.1:8080");
+//!         let suite = Suite::new("health").test("responds", |cx| async move {
+//!             cx.request("GET", "/health").send().await?.expect(200)?;
+//!             Ok(())
+//!         });
+//!
+//!         Ok(apitest::harness::Plan::new(cfg).suite(suite))
 //!     })
 //! }
 //! ```
