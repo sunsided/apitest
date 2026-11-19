@@ -366,7 +366,7 @@ async fn lockfile_records_used_surface_and_narrows_drift_checks() {
 async fn utoipa_style_in_process_live_document() {
     let srv = server(demo::Variant::V1_0).await;
     // With utoipa this would be `serde_json::to_value(ApiDoc::openapi())?`.
-    let doc: Value = serde_yaml_ng::from_str(
+    let doc: Value = serde_saphyr::from_str(
         &std::fs::read_to_string(rust_suite::specs_dir().join("billing-2.0.yaml")).unwrap(),
     )
     .unwrap();

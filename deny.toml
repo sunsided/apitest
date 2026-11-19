@@ -5,7 +5,9 @@ all-features = true
 
 [advisories]
 # Advisories (vulnerable, unmaintained, yanked) fail by default; ignore entries need a reason.
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0249", reason = "smartstring is unmaintained; transitive via rhai, no maintained rhai release without it yet" },
+]
 
 [licenses]
 # Permissive licenses plus the weak-copyleft ones this project family uses (see docs/licensing.md).
@@ -15,10 +17,12 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
   "CC0-1.0",
   "EUPL-1.2",
   "ISC",
   "MIT",
+  "MIT-0",
   "MPL-2.0",
   "Unicode-3.0",
   "Zlib",

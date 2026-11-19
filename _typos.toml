@@ -8,7 +8,13 @@ extend-exclude = [
   "LICENSES/**",
 ]
 
+[default]
+# Hex trace/span ids (`00f067aa0ba902b7`) are not words.
+extend-ignore-re = ["\\b[0-9a-f]{16,}\\b"]
+
 [default.extend-words]
 # Project-specific words typos flags wrongly, e.g. `ser = "ser"`. Keep each entry justified.
+# RFC 4648 base64 test vector ("fo" -> "Zm8=") in auth.rs.
+fo = "fo"
 
 [default.extend-identifiers]

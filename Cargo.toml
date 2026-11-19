@@ -8,7 +8,7 @@ version = "0.0.1"
 edition = "2024"
 license = "EUPL-1.2 OR MIT OR Apache-2.0"
 repository = "https://github.com/sunsided/apitest"
-rust-version = "1.89"
+rust-version = "1.95"
 
 [workspace.dependencies]
 apitest = { version = "0.0.1", path = "crates/apitest", default-features = false }

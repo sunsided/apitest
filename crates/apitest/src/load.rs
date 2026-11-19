@@ -629,7 +629,7 @@ async fn vu_loop(
             break;
         }
         if let Some(b) = &budget
-            && b.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            && b.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .is_err()
         {
             break;

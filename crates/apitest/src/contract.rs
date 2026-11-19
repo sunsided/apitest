@@ -85,9 +85,9 @@ impl Spec {
 
     pub fn from_bytes(raw: &[u8], ext_hint: Option<&str>) -> Result<Spec> {
         let doc: Value = match ext_hint {
-            Some("yaml" | "yml") => serde_yaml_ng::from_slice(raw)?,
+            Some("yaml" | "yml") => serde_saphyr::from_slice(raw)?,
             Some("json") => serde_json::from_slice(raw)?,
-            _ => serde_json::from_slice(raw).or_else(|_| serde_yaml_ng::from_slice(raw))?,
+            _ => serde_json::from_slice(raw).or_else(|_| serde_saphyr::from_slice(raw))?,
         };
         let sha256 = Sha256::digest(raw)
             .iter()

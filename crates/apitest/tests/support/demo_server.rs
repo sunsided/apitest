@@ -219,7 +219,7 @@ async fn openapi(State(s): State<AppState>) -> Response {
         Variant::V1_1 => SPEC_1_1,
         Variant::V2_0 => SPEC_2_0,
     };
-    let doc: Value = serde_yaml_ng::from_str(yaml).expect("embedded spec is valid YAML");
+    let doc: Value = serde_saphyr::from_str(yaml).expect("embedded spec is valid YAML");
     Json(doc).into_response()
 }
 

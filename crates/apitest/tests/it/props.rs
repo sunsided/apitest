@@ -81,7 +81,7 @@ proptest! {
     fn json_and_yaml_load_the_same_operations(ops in operations()) {
         let doc = openapi(&ops);
         let from_json = Spec::from_bytes(serde_json::to_string(&doc).unwrap().as_bytes(), Some("json")).unwrap();
-        let from_yaml = Spec::from_bytes(serde_yaml_ng::to_string(&doc).unwrap().as_bytes(), Some("yaml")).unwrap();
+        let from_yaml = Spec::from_bytes(serde_saphyr::to_string(&doc).unwrap().as_bytes(), Some("yaml")).unwrap();
 
         prop_assert_eq!(
             from_json.operations.keys().collect::<Vec<_>>(),

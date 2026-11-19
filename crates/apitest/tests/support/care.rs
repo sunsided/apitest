@@ -269,7 +269,7 @@ async fn stats(State(s): State<St>) -> Json<Value> {
 }
 
 fn spec(yaml: &str) -> Value {
-    serde_yaml_ng::from_str(yaml).expect("embedded spec")
+    serde_saphyr::from_str(yaml).expect("embedded spec")
 }
 
 fn hub_router(s: St) -> Router {
