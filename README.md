@@ -30,13 +30,18 @@ API testing and load testing in Rust, with:
 - [Authentication](#authentication)
 - [Tracing and headers](#tracing-and-headers)
 - [The same suite in four languages](#the-same-suite-in-four-languages)
+  - [Rust](#rust)
+  - [Rhai](#rhai)
+  - [JavaScript](#javascript)
+  - [Python](#python)
+  - [Per-test setup and teardown](#per-test-setup-and-teardown)
 - [Contract pinning](#contract-pinning)
 - [Using it as a library (axum example)](#using-it-as-a-library-axum-example)
   - [Native-feeling Rust tests: attribute macros](#native-feeling-rust-tests-attribute-macros)
   - [nextest](#nextest)
 - [CLI](#cli)
 - [Load testing](#load-testing)
-- [Python](#python)
+- [Python](#python-1)
 - [Tests](#tests)
 - [npm](#npm)
 - [Open questions / next steps](#open-questions--next-steps)
@@ -345,44 +350,46 @@ Every request carries trace context unless you opt out. W3C Trace Context is the
 
 ## The same suite in four languages
 
-<table><tr><td>
+### Rust
 
-**Rust** (attribute macros + actors; the builder API also exists)
+Attribute macros and actors; the builder API also exists.
 
 ```rust
 #[apitest::suite]
 fn billing() -> Result<Suite> {
-  Suite::new("billing").pinned("billing", "specs/billing-1.0.yaml")
+    Suite::new("billing").pinned("billing", "specs/billing-1.0.yaml")
 }
 
 /// One login per suite; revoked when the suite ends.
 #[apitest::fixture(scope = "suite")]
 async fn user() -> Result<Actor> {
-  let anon = Actor::on("billing");
-  let token: String = anon.call("issueToken")
-    .form(&[("user", "demo"), ("pass", "secret")])
-    .expect(200).await?
-    .get("/access_token")?;
-  let user = anon.with_bearer(token);
-  undo(user.call("revokeToken").expect(204))?;
-  Ok(user)
+    let anon = Actor::on("billing");
+    let token: String = anon
+        .call("issueToken")
+        .form(&[("user", "demo"), ("pass", "secret")])
+        .expect(200)
+        .await?
+        .get("/access_token")?;
+
+    let user = anon.with_bearer(token);
+    undo(user.call("revokeToken").expect(204))?;
+    Ok(user)
 }
 
 #[apitest::test(parallel)]
 async fn create_invoice(user: Actor) -> Result<()> {
-  user.call("createInvoice")
-    .json(json!({ "amount": 4200, "currency": "EUR" }))
-    .expect(201)
-    .rollback(|inv| user.call("deleteInvoice")
-                        .path("id", &inv["id"]).expect(204))
-    .await?;
-  Ok(())
+    user.call("createInvoice")
+        .json(json!({ "amount": 4200, "currency": "EUR" }))
+        .expect(201)
+        .rollback(|inv| user.call("deleteInvoice").path("id", &inv["id"]).expect(204))
+        .await?;
+    Ok(())
 }
 ```
 
-</td><td>
+### Rhai
 
-**Rhai** (`cx.op`, since `.call` is reserved in Rhai)
+`cx.op` instead of `cx.call`, because `call` is reserved in Rhai.
 
 ```rhai
 let s = suite("billing");
@@ -408,9 +415,9 @@ s.test("create invoice", #{ parallel: true }, |cx| {
 s
 ```
 
-</td></tr><tr><td>
+### JavaScript
 
-**JavaScript** (sync like k6; one QuickJS runtime per worker/VU)
+Synchronous like k6, with one QuickJS runtime per worker or VU.
 
 ```js
 const s = suite("billing");
@@ -434,9 +441,9 @@ s.test("create invoice", { parallel: true }, (cx) => {
 });
 ```
 
-</td><td>
+### Python
 
-**Python** (pytest-style `yield` fixtures)
+pytest-style `yield` fixtures.
 
 ```python
 s = apitest.Suite("billing")
@@ -461,7 +468,7 @@ def create_invoice(cx):
 report = s.run("http://127.0.0.1:8080")
 ```
 
-</td></tr></table>
+### Per-test setup and teardown
 
 Per-test setup/teardown and resource locks look like this in Rhai (other languages are equivalent):
 
