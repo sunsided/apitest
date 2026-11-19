@@ -1,4 +1,4 @@
-# Lints the workflows themselves. Action refs are tags here; pin with scripts/pin-actions.py.
+# Lints the workflows themselves: actionlint and zizmor.
 name: GitHub Actions lint
 
 # No path filters: a path-filtered workflow cannot be a required status check.
@@ -24,10 +24,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+      # install-action no longer ships actionlint; go install checks the module against the Go
+      # checksum database. Bump the actionlint version by hand (Dependabot does not track it).
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          tool: actionlint
-      - run: actionlint -color
+          go-version: '1.27.4'
+          cache: false # no go.sum here; one tool install does not need a module cache
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - run: '"$(go env GOPATH)/bin/actionlint" -color'
 
   zizmor:
     name: zizmor
