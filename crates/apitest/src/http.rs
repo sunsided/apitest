@@ -673,7 +673,7 @@ fn to_value(v: impl Serialize) -> Value {
 }
 
 /// At most `n` bytes of `s` (cut back to a char boundary), with `…` if shortened.
-fn truncate(s: &str, n: usize) -> String {
+pub(crate) fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         return s.to_string();
     }
@@ -687,7 +687,7 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 /// A value as it appears in a URL or header: strings unquoted, the rest as JSON text.
-fn scalar(v: &Value) -> String {
+pub(crate) fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),

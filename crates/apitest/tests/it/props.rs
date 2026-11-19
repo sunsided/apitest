@@ -1,4 +1,5 @@
-//! Property tests for the parsers, the drift diff, `.env` parsing and redaction.
+//! Property tests for the parsers, the drift diff, `.env` parsing, redaction and
+//! Gherkin tag expressions.
 
 use std::collections::BTreeMap;
 
@@ -282,5 +283,119 @@ proptest! {
     #[test]
     fn dotenv_never_panics(text in any::<String>()) {
         let _ = apitest::dotenv::parse(&text);
+    }
+}
+
+/// `--tags` expressions: user input, parsed by the `gherkin` crate.
+#[cfg(feature = "cucumber")]
+mod tag_expressions {
+    use apitest::cucumber::{MAX_TAG_EXPRESSION_LEN, TagFilter};
+    use proptest::prelude::*;
+
+    /// The tags expressions draw from.
+    const TAGS: [&str; 4] = ["a", "b", "c", "d"];
+
+    /// A tag expression tree.
+    #[derive(Debug, Clone)]
+    enum Expr {
+        /// `@TAGS[i]`.
+        Tag(usize),
+        /// `not x`.
+        Not(Box<Expr>),
+        /// `x and y`.
+        And(Box<Expr>, Box<Expr>),
+        /// `x or y`.
+        Or(Box<Expr>, Box<Expr>),
+    }
+
+    impl Expr {
+        /// Binding strength: `or` < `and` < `not` < a tag.
+        fn precedence(&self) -> u8 {
+            match self {
+                Expr::Or(..) => 1,
+                Expr::And(..) => 2,
+                Expr::Not(_) => 3,
+                Expr::Tag(_) => 4,
+            }
+        }
+
+        /// The expression with parentheses only where precedence needs them.
+        fn render(&self) -> String {
+            match self {
+                Expr::Tag(i) => format!("@{}", TAGS[*i]),
+                Expr::Not(x) => format!("not {}", x.operand(3)),
+                Expr::And(x, y) => format!("{} and {}", x.operand(2), y.operand(3)),
+                Expr::Or(x, y) => format!("{} or {}", x.operand(1), y.operand(2)),
+            }
+        }
+
+        /// Rendered as an operand that must bind at least as strongly as `min`.
+        fn operand(&self, min: u8) -> String {
+            if self.precedence() < min {
+                format!("({})", self.render())
+            } else {
+                self.render()
+            }
+        }
+
+        /// Whether a scenario with `tags` is selected.
+        fn holds(&self, tags: &[&str]) -> bool {
+            match self {
+                Expr::Tag(i) => tags.contains(&TAGS[*i]),
+                Expr::Not(x) => !x.holds(tags),
+                Expr::And(x, y) => x.holds(tags) && y.holds(tags),
+                Expr::Or(x, y) => x.holds(tags) || y.holds(tags),
+            }
+        }
+    }
+
+    /// Random expression trees up to a few levels deep.
+    fn expr() -> impl Strategy<Value = Expr> {
+        (0..TAGS.len())
+            .prop_map(Expr::Tag)
+            .prop_recursive(4, 24, 2, |inner| {
+                prop_oneof![
+                    inner.clone().prop_map(|x| Expr::Not(Box::new(x))),
+                    (inner.clone(), inner.clone())
+                        .prop_map(|(x, y)| Expr::And(Box::new(x), Box::new(y))),
+                    (inner.clone(), inner).prop_map(|(x, y)| Expr::Or(Box::new(x), Box::new(y))),
+                ]
+            })
+    }
+
+    proptest! {
+        /// A rendered expression parses and selects exactly what the tree selects,
+        /// so precedence and `not` work as Cucumber documents them.
+        #[test]
+        fn expressions_select_like_their_tree(
+            e in expr(),
+            tags in prop::sample::subsequence(TAGS.to_vec(), 0..=TAGS.len()),
+        ) {
+            let text = e.render();
+            let filter = TagFilter::parse(&text).unwrap();
+            prop_assert_eq!(filter.matches(&tags), e.holds(&tags), "{}", text);
+        }
+
+        /// Arbitrary text never makes the parser or the matcher panic.
+        #[test]
+        fn tag_expressions_never_panic(
+            text in any::<String>(),
+            tags in prop::collection::vec("@?[a-z]{1,3}", 0..4),
+        ) {
+            if let Ok(filter) = TagFilter::parse(&text) {
+                let _ = filter.matches(&tags);
+            }
+        }
+
+        /// Nesting as deep as the length limit allows parses without exhausting the stack.
+        #[test]
+        fn nesting_up_to_the_limit_is_safe(open in prop::sample::select(vec!["(", "not ", "not ("])) {
+            let close = if open.contains('(') { ")" } else { "" };
+            let depth = (MAX_TAG_EXPRESSION_LEN - 2) / (open.len() + close.len());
+            let text = format!("{}@a{}", open.repeat(depth), close.repeat(depth));
+            prop_assert!(text.len() <= MAX_TAG_EXPRESSION_LEN);
+            let filter = TagFilter::parse(&text).unwrap();
+            let _ = filter.matches(&["a"]);
+        }
     }
 }

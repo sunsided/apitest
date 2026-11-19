@@ -136,7 +136,7 @@ enum Cmd {
 /// Arguments of `apitest run`.
 #[derive(Args)]
 struct RunArgs {
-    /// Suite files (.rhai, .js). Default: `suites` from the config.
+    /// Suite files (.rhai, .js, .feature). Default: `suites` from the config.
     files: Vec<PathBuf>,
     /// Shared options.
     #[command(flatten)]
@@ -144,6 +144,10 @@ struct RunArgs {
     /// Only run tests whose name contains this (repeatable).
     #[arg(long)]
     only: Vec<String>,
+    /// Cucumber tag expression for .feature files, e.g. "@smoke and not @slow".
+    /// Scenarios that don't match are left out.
+    #[arg(long)]
+    tags: Option<String>,
     /// Write a `JUnit` XML report.
     #[arg(long)]
     junit: Option<PathBuf>,
@@ -161,7 +165,7 @@ struct RunArgs {
 /// Arguments of `apitest load`.
 #[derive(Args)]
 struct LoadArgs {
-    /// Suite file (.rhai, .js) that defines the scenario test.
+    /// Suite file (.rhai, .js, .feature) that defines the scenario test.
     file: PathBuf,
     /// Shared options.
     #[command(flatten)]
@@ -384,6 +388,7 @@ async fn run_tests(args: RunArgs, redactor: &Redactor) -> Result<bool> {
 
     let opts = LoadOptions {
         js_workers: project.as_ref().and_then(|p| p.js_workers).unwrap_or(2),
+        tags: args.tags,
     };
     let suites = load_all(&args.files, project.as_ref(), &opts)?;
     drift::check_targets(&cfg, &suites, extra_project(&args.files, project.as_ref()))?;
@@ -444,6 +449,7 @@ async fn run_load_test(args: LoadArgs, redactor: &Redactor) -> Result<bool> {
         &args.file,
         &LoadOptions {
             js_workers: max_vus(&scenario.executor).max(1),
+            ..LoadOptions::default()
         },
     )?;
     drift::check_targets(&cfg, &suites, project.as_ref())?;

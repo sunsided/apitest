@@ -33,7 +33,10 @@ fn main() {
             )?)
             .suites(load_suites(
                 &scripts.join("billing.js"),
-                &LoadOptions { js_workers: 2 },
+                &LoadOptions {
+                    js_workers: 2,
+                    ..Default::default()
+                },
             )?)
             .keep(server))
     })
