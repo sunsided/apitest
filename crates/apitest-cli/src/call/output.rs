@@ -130,26 +130,19 @@ fn register_value(redactor: &Redactor, v: &str) {
     }
 }
 
-/// Whether a query parameter name is a credential's: `token`, `key`,
-/// `apikey`, `password`, `secret`, `sig`, `signature`, or a name ending in
-/// `_token`, `_key`, `_secret` or `_password` (also with `-`), ignoring case.
+/// Whether a query parameter name is a credential's: `key`, `apikey`, `sig`,
+/// `signature`, a name ending in `token`, `secret` or `password` (also
+/// camelCase such as `accessToken`), or one ending in `_key`/`-key`, ignoring
+/// case. `key` needs the separator so names like `monkey` stay visible.
 fn is_secret_param(name: &str) -> bool {
-    const EXACT: [&str; 7] = [
-        "token",
-        "key",
-        "apikey",
-        "password",
-        "secret",
-        "sig",
-        "signature",
-    ];
-    const SUFFIXES: [&str; 4] = ["token", "key", "secret", "password"];
+    const EXACT: [&str; 4] = ["key", "apikey", "sig", "signature"];
+    const SUFFIXES: [&str; 3] = ["token", "secret", "password"];
     let name = name.to_ascii_lowercase();
 
     EXACT.contains(&name.as_str())
-        || SUFFIXES
-            .iter()
-            .any(|s| name.ends_with(&format!("_{s}")) || name.ends_with(&format!("-{s}")))
+        || SUFFIXES.iter().any(|s| name.ends_with(s))
+        || name.ends_with("_key")
+        || name.ends_with("-key")
 }
 
 /// Whether `name` is `Authorization` or `Proxy-Authorization`, whose values
@@ -249,6 +242,10 @@ mod tests {
             "sig",
             "Signature",
             "X-Api-Key",
+            "accessToken",
+            "clientSecret",
+            "authToken",
+            "userPassword",
         ] {
             assert!(is_secret_param(n), "{n}");
         }
