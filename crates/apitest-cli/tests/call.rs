@@ -1,7 +1,10 @@
 //! `apitest call` end to end: the real binary against an in-process service.
 
+use std::io::Write as _;
 use std::path::{Path as FsPath, PathBuf};
+use std::process::Stdio;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query};
@@ -123,6 +126,9 @@ fn serve_app(app: Router) -> String {
     format!("http://{}", rx.recv().unwrap())
 }
 
+/// Numbers the project directories of this test process, so no two tests share one.
+static NEXT_PROJECT: AtomicU64 = AtomicU64::new(0);
+
 /// A temporary project directory, removed when the test ends.
 struct Project(PathBuf);
 
@@ -144,12 +150,10 @@ impl Drop for Project {
 /// `hub_admin` actor that logs in and a `monitor` actor with an API key, plus
 /// the `extra` config lines.
 fn project(url: &str, extra: &str) -> Project {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("apitest-call-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let n = NEXT_PROJECT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("apitest-call-{}-{n}", std::process::id()));
+    // `create_dir` fails on a leftover instead of sharing it with another test.
+    std::fs::create_dir(&dir).unwrap();
 
     let cfg = format!(
         "services:
@@ -179,18 +183,37 @@ actors:
     Project(dir)
 }
 
-/// Runs `apitest call <args>` in `dir`, without colours or credential env vars.
-fn apitest(dir: &FsPath, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_apitest"))
-        .current_dir(dir)
+/// `apitest call <args>` in `dir`, without colours or credential env vars.
+fn command(dir: &FsPath, args: &[&str]) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_apitest"));
+    c.current_dir(dir)
         .arg("call")
         .args(args)
         .env_remove("HUB_USER")
         .env_remove("HUB_PASSWORD")
         .env_remove("CLICOLOR_FORCE")
-        .env("NO_COLOR", "1")
-        .output()
-        .unwrap()
+        .env("NO_COLOR", "1");
+
+    c
+}
+
+/// Runs `apitest call <args>` in `dir` with an empty stdin.
+fn apitest(dir: &FsPath, args: &[&str]) -> Output {
+    command(dir, args).output().unwrap()
+}
+
+/// Runs `apitest call <args>` in `dir` with `input` on stdin.
+fn apitest_with_stdin(dir: &FsPath, args: &[&str], input: &[u8]) -> Output {
+    let mut child = command(dir, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A process that exits before reading closes the pipe; that is not a test failure.
+    let _ = child.stdin.take().unwrap().write_all(input);
+
+    child.wait_with_output().unwrap()
 }
 
 /// The process's stdout as text.
@@ -652,4 +675,72 @@ fn verbose_shows_the_query_and_redacts_credentials_from_flags() {
         &["hub", "GET", "/echo", "--query", "keyword=red shoes", "-v"],
     );
     assert_eq!(v["query"]["keyword"], "red shoes");
+}
+
+#[test]
+fn bodies_come_from_stdin_files_or_at_at() {
+    let dir = project(&serve(), "");
+    let args = ["hub", "POST", "/echo", "--json", "@-"];
+    let o = apitest_with_stdin(&dir, &args, br#"{"from":"stdin"}"#);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&o.stdout).unwrap()["body"],
+        r#"{"from":"stdin"}"#
+    );
+
+    std::fs::write(dir.join("user.json"), r#"{"from":"file"}"#).unwrap();
+    let v = echo_json(&dir, &["hub", "POST", "/echo", "--json", "@user.json"]);
+    assert_eq!(v["body"], r#"{"from":"file"}"#);
+
+    let v = echo_json(&dir, &["hub", "POST", "/echo", "--data", "@@handle"]);
+    assert_eq!(v["body"], "@handle");
+
+    let o = apitest(&dir, &["hub", "POST", "/echo", "--data", "@"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("'@' needs a file name"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn bad_input_is_refused_before_the_body_is_read() {
+    let dir = project(&serve(), "");
+    for (args, why) in [
+        (
+            &["hub", "POST", "/echo", "-H", "X Foo: v", "--json", "@-"][..],
+            "invalid header name 'X Foo'",
+        ),
+        (
+            &["hub", "POST", "/echo", "-H", "X-A: a\nb", "--json", "@-"],
+            "invalid value for header 'X-A'",
+        ),
+        (
+            &["hub", "GE T", "/echo", "--json", "@-"],
+            "invalid HTTP method",
+        ),
+        (
+            &["hub", "POST", "/users/{id}", "--json", "@-"],
+            "has no path parameters",
+        ),
+    ] {
+        // Stdin is not JSON: reading it would fail differently.
+        let o = apitest_with_stdin(&dir, args, b"not json");
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(stderr(&o).contains(why), "{args:?}: {}", stderr(&o));
+    }
+}
+
+#[test]
+fn a_service_url_without_a_scheme_is_refused_by_name() {
+    let dir = project(&serve(), "");
+    std::fs::write(dir.join("other.nova"), "services:\n  hub: localhost:8080\n").unwrap();
+    let o = apitest(&dir, &["hub", "GET", "/x", "--config", "other.nova"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("service 'hub' in other.nova has the URL 'localhost:8080'"),
+        "{}",
+        stderr(&o)
+    );
 }

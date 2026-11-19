@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 
 use apitest::config::ProjectConfig;
@@ -89,17 +90,31 @@ fn parse_timeout(s: &str) -> Result<Duration, String> {
     }
 }
 
-/// Parses `-H 'Name: value'`; the value is trimmed and may contain `:`.
+/// Parses `-H 'Name: value'`; the value is trimmed and may contain `:`. The
+/// name must be an HTTP token and the value visible ASCII, so a bad header is a
+/// usage error before any body is read.
 fn parse_header(s: &str) -> Result<(String, String), String> {
     let (k, v) = s
         .split_once(':')
         .ok_or_else(|| format!("expected 'Name: value', got '{s}'"))?;
-    let k = k.trim();
+    let (k, v) = (k.trim(), v.trim());
     if k.is_empty() {
         return Err(format!("empty header name in '{s}'"));
     }
 
-    Ok((k.to_string(), v.trim().to_string()))
+    if HeaderName::from_bytes(k.as_bytes()).is_err() {
+        return Err(format!(
+            "invalid header name '{k}': use letters, digits and !#$%&'*+-.^_`|~, no spaces"
+        ));
+    }
+
+    if HeaderValue::from_str(v).is_err() {
+        return Err(format!(
+            "invalid value for header '{k}': only visible ASCII, spaces and tabs, no line breaks"
+        ));
+    }
+
+    Ok((k.to_string(), v.to_string()))
 }
 
 /// Runs `apitest call`. `Ok(false)` means the status was not the expected one.
@@ -260,5 +275,11 @@ mod tests {
         );
         assert!(parse_header("nope").is_err());
         assert!(parse_header(": v").is_err());
+        assert!(parse_header("X Foo: v").unwrap_err().contains("'X Foo'"));
+        assert!(
+            parse_header("X-A: a\r\nY: b")
+                .unwrap_err()
+                .contains("header 'X-A'")
+        );
     }
 }
