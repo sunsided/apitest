@@ -725,6 +725,7 @@ Each scenario checks `GET /_stats` afterwards to prove that no tokens or invoice
 - **Reports.** JUnit and JSON exist; CTRF, TAP or a live event stream (JSON lines) for dashboards would be next.
 - **Ctrl-C.** Cleanups currently run on normal completion, failures, panics and timeouts, but not on SIGINT. That needs a cancellation token threaded through the runner.
 - **Type-safe Rust clients.** Generating progenitor clients from the pinned spec would add compile-time pinning on top of the runtime check.
+- **Agent exploration over MCP.** An optional `apitest mcp` session where an agent explores the live API as authenticated actors, with journalled rollback, and exports what it did as a `.rs` or `.rhai` test. See the [design doc](https://github.com/sunsided/apitest/blob/main/docs/design/mcp-exploration.md).
 - **NOVA schemas.** Ship `.novs` schemas for `apitest.nova` and the lockfile so editors can validate them.
 
 ## License
