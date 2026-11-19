@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn bad_timeouts_are_usage_errors_not_panics() {
-        for t in ["-1s", "NaN", "infs", "1e300s", "0s"] {
+        for t in ["-1s", "NaN", "infs", "1e300s", "0s", "50%", "100%", "5h"] {
             assert!(parse_timeout(t).is_err(), "{t}");
         }
 

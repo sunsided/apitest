@@ -373,9 +373,13 @@ pub fn parse_quantity(s: &str) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Fails if `s` is not a valid quantity (see [`parse_quantity`]), or if it is
-/// negative, not finite, or too large for a [`Duration`].
+/// Fails if `s` is not a valid quantity (see [`parse_quantity`]), is a
+/// percentage, or is negative, not finite, or too large for a [`Duration`].
 pub fn parse_duration(s: &str) -> Result<Duration> {
+    if s.trim().ends_with('%') {
+        bail!("invalid duration '{s}': a percentage is not a time (expected e.g. 500ms, 30s, 2m)");
+    }
+
     Duration::try_from_secs_f64(parse_quantity(s)? / 1000.0)
         .map_err(|_| anyhow!("invalid duration '{s}' (expected e.g. 500ms, 30s, 2m)"))
 }

@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use std::time::Duration;
+
 use apitest::Contract;
 use apitest::Redactor;
 use apitest::RunConfig;
@@ -118,12 +120,37 @@ proptest! {
         prop_assert_eq!(parse_quantity(&n.to_string()).unwrap(), v);
     }
 
-    /// Durations never panic: negative, non-finite and huge values are errors.
+    /// Durations in every time unit parse to the value written; a bare number is milliseconds.
     #[test]
-    fn durations_never_panic(s in "-?[0-9.e+-]{0,8}(ms|s|m|inf|NaN)?") {
-        if let Ok(d) = parse_duration(&s) {
-            prop_assert!(d.as_secs_f64().is_finite());
+    fn durations_parse_in_every_time_unit(n in 0u32..1_000_000) {
+        let ms = f64::from(n);
+
+        prop_assert_eq!(parse_duration(&format!("{n}s")).unwrap(), Duration::from_secs(n.into()));
+        prop_assert_eq!(parse_duration(&format!("{n}m")).unwrap(), Duration::from_secs(u64::from(n) * 60));
+        for s in [format!("{n}ms"), n.to_string()] {
+            let d = parse_duration(&s).unwrap();
+            prop_assert!((d.as_secs_f64() * 1000.0 - ms).abs() < 1e-6, "{s} parsed to {d:?}");
         }
+    }
+
+    /// Percentages, negative, non-finite and overflowing durations are errors, not panics.
+    #[test]
+    fn invalid_durations_are_errors(
+        s in prop_oneof![
+            "[0-9]{1,4}(\\.[0-9])?%",
+            "-[1-9][0-9]{0,4}(ms|s|m)?",
+            "-?(inf|infinity|NaN|INF|nan)(ms|s|m)?",
+            "[1-9]e[3-9][0-9]{2}(ms|s|m)?",
+            "[0-9]{1,3}(h|d|x|sec)",
+        ],
+    ) {
+        prop_assert!(parse_duration(&s).is_err(), "{s} was accepted");
+    }
+
+    /// Arbitrary input never panics the duration parser.
+    #[test]
+    fn durations_never_panic(s in "-?[0-9.e+-]{0,8}(ms|s|m|%|inf|NaN)?") {
+        let _ = parse_duration(&s);
     }
 
     /// Every comparison operator is accepted, for both metric groups.
