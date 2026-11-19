@@ -1,4 +1,19 @@
 //! Scope chain, fixture values, deferred teardown and the test-facing [`Ctx`].
+//!
+//! Every context points at one frame; frames link to their parent, forming a
+//! chain from the innermost scope up to the run:
+//!
+//! ```mermaid
+//! flowchart BT
+//!     T[test frame] --> V[vu frame] --> S[suite frame] --> R[run frame]
+//! ```
+//!
+//! Lookups (values, default headers, scope auth) walk this chain from the inside
+//! out. Each frame owns its cleanups, which run LIFO when its scope ends.
+//!
+//! All per-frame state sits behind `std::sync::Mutex`es that are only held for
+//! short, non-panicking critical sections. Methods documented with `# Panics`
+//! panic only if such a mutex was poisoned anyway.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -58,31 +73,50 @@ impl fmt::Display for Scope {
 /// A cleanup action, run when its scope ends.
 pub type DeferFn = Box<dyn FnOnce(Ctx) -> BoxFut<()> + Send>;
 
+/// A registered cleanup and the label it is reported under if it fails.
 struct Deferred {
+    /// Shown in cleanup error messages, e.g. `undo hub:deleteUser {id=7}`.
     label: String,
+    /// The cleanup itself.
     f: DeferFn,
 }
 
+/// One link of the scope chain: what a single scope owns.
 pub(crate) struct Frame {
+    /// Which kind of scope this frame is.
     scope: Scope,
+    /// Suite name, `vu-<n>`, test name, or `run` for the root.
     name: String,
+    /// Virtual user index, inherited from the parent unless this is a VU frame.
     vu: Option<usize>,
+    /// The enclosing frame; `None` only for the run frame.
     parent: Option<Arc<Frame>>,
+    /// Fixture values and [`Ctx::set`] values stored in this scope.
     values: Mutex<HashMap<String, Value>>,
+    /// Default headers of this scope, unique by name (case-insensitively).
     headers: Mutex<Vec<(String, String)>>,
+    /// Cleanups in registration order; popped from the end (LIFO).
     teardown: Mutex<Vec<Deferred>>,
+    /// Steps recorded by [`crate::dsl::step`]; only filled on test and run frames.
     steps: Mutex<Vec<crate::report::StepReport>>,
+    /// The trace of this scope, created on first use.
     trace: Mutex<Option<crate::trace::TraceContext>>,
+    /// Scope-wide credentials set with [`Ctx::auth`].
     auth: Mutex<Option<crate::auth::Auth>>,
+    /// Load-test metrics sink, inherited by child frames.
     #[cfg(feature = "load")]
     metrics: Option<Arc<crate::load::Metrics>>,
 }
 
 /// State shared by every context of one run.
 pub(crate) struct Shared {
+    /// HTTP client for all requests of the run (connection pooling).
     pub(crate) http: reqwest::Client,
+    /// The run configuration.
     pub(crate) config: RunConfig,
+    /// Contracts by name.
     pub(crate) contracts: HashMap<String, Arc<Contract>>,
+    /// Counts contract calls to sample validation (`RunConfig::validate_every`).
     pub(crate) validate_counter: AtomicU64,
     /// The run's parent trace (from `TRACEPARENT` or config), resolved once.
     pub(crate) trace_parent: Option<(crate::trace::Traceparent, Option<String>)>,
@@ -94,11 +128,14 @@ pub(crate) struct Shared {
 /// and default headers are looked up from the innermost frame outwards.
 #[derive(Clone)]
 pub struct Ctx {
+    /// Run-wide state, the same for every context of the run.
     pub(crate) shared: Arc<Shared>,
+    /// The innermost frame this context sees.
     frame: Arc<Frame>,
 }
 
 impl Ctx {
+    /// The run-scope context every other context descends from.
     pub(crate) fn root(shared: Arc<Shared>) -> Self {
         Ctx {
             shared,
@@ -137,6 +174,7 @@ impl Ctx {
         cx
     }
 
+    /// A context on a new frame below this one; `vu` overrides the inherited VU index.
     fn child_frame(&self, scope: Scope, name: String, vu: Option<usize>) -> Self {
         Ctx {
             shared: self.shared.clone(),
@@ -172,16 +210,18 @@ impl Ctx {
     /// Path like `billing/vu-0/create invoice`.
     #[must_use]
     pub fn path(&self) -> String {
-        let mut parts = vec![];
-        let mut f = Some(&self.frame);
-        while let Some(frame) = f {
-            if frame.scope != Scope::Run {
-                parts.push(frame.name.as_str());
-            }
-            f = frame.parent.as_ref();
-        }
+        let mut parts: Vec<&str> = self
+            .frames()
+            .filter(|frame| frame.scope != Scope::Run)
+            .map(|frame| frame.name.as_str())
+            .collect();
         parts.reverse();
         parts.join("/")
+    }
+
+    /// This context's frame followed by all its ancestors, ending at the run frame.
+    fn frames(&self) -> impl Iterator<Item = &Arc<Frame>> {
+        std::iter::successors(Some(&self.frame), |frame| frame.parent.as_ref())
     }
 
     /// Virtual user index, if running inside a VU (always `Some(0)` in functional runs).
@@ -190,6 +230,7 @@ impl Ctx {
         self.frame.vu
     }
 
+    /// The load-test metrics sink of this scope, if it runs under a load plan.
     #[cfg(feature = "load")]
     pub(crate) fn metrics(&self) -> Option<&Arc<crate::load::Metrics>> {
         self.frame.metrics.as_ref()
@@ -206,6 +247,10 @@ impl Ctx {
     /// With the default [`crate::trace::TraceScope::Test`] this is the same for every
     /// request of one test, and different between tests. With `TraceScope::Request`
     /// every request starts its own trace; use `resp.trace` there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame's trace mutex is poisoned.
     #[must_use]
     pub fn trace(&self) -> crate::trace::TraceContext {
         use crate::trace::{TraceContext, TraceScope};
@@ -213,18 +258,15 @@ impl Ctx {
         if cfg.scope == TraceScope::Request {
             return TraceContext::fresh(cfg, self.shared.trace_parent.as_ref());
         }
+
         let want = match cfg.scope {
             TraceScope::Run => Scope::Run,
             TraceScope::Suite => Scope::Suite,
             _ => Scope::Test,
         };
+
         // The nearest frame of the wanted scope; else the nearest suite; else the root.
-        let mut chain = vec![];
-        let mut f = Some(&self.frame);
-        while let Some(frame) = f {
-            chain.push(frame);
-            f = frame.parent.as_ref();
-        }
+        let chain: Vec<&Arc<Frame>> = self.frames().collect();
         let target = chain
             .iter()
             .find(|fr| fr.scope == want)
@@ -241,6 +283,10 @@ impl Ctx {
 
     /// Authenticates every request from this scope and its children that has no
     /// auth of its own (actors and explicit headers win).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame's auth mutex is poisoned.
     pub fn auth(&self, auth: crate::auth::Auth) {
         *self.frame.auth.lock().unwrap() = Some(auth);
     }
@@ -256,45 +302,41 @@ impl Ctx {
     }
 
     /// The nearest scope auth, if any.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a frame's auth mutex is poisoned.
     #[must_use]
     pub fn scope_auth(&self) -> Option<crate::auth::Auth> {
-        let mut f = Some(&self.frame);
-        while let Some(frame) = f {
-            if let Some(a) = frame.auth.lock().unwrap().clone() {
-                return Some(a);
-            }
-            f = frame.parent.as_ref();
-        }
-        None
+        self.frames()
+            .find_map(|frame| frame.auth.lock().unwrap().clone())
     }
 
     /// Name of the nearest frame of `scope` (suite name, test name, ...).
     #[must_use]
     pub fn name_of(&self, scope: Scope) -> Option<String> {
-        let mut f = Some(&self.frame);
-        while let Some(frame) = f {
-            if frame.scope == scope {
-                return Some(frame.name.clone());
-            }
-            f = frame.parent.as_ref();
-        }
-        None
+        self.frames()
+            .find(|frame| frame.scope == scope)
+            .map(|frame| frame.name.clone())
     }
 
     /// Looks up a value (usually a fixture) in this scope or any parent scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a frame's value mutex is poisoned.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Value> {
-        let mut f = Some(&self.frame);
-        while let Some(frame) = f {
-            if let Some(v) = frame.values.lock().unwrap().get(key) {
-                return Some(v.clone());
-            }
-            f = frame.parent.as_ref();
-        }
-        None
+        self.frames()
+            .find_map(|frame| frame.values.lock().unwrap().get(key).cloned())
     }
 
     /// Typed variant of [`Ctx::get`]; errors if the value is missing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no visible scope holds `key`, or when its value does not
+    /// deserialize into `T`.
     pub fn get_as<T: DeserializeOwned>(&self, key: &str) -> Result<T> {
         let v = self
             .get(key)
@@ -303,6 +345,14 @@ impl Ctx {
     }
 
     /// Stores a value in the *current* scope.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `value` cannot be serialized to JSON.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame's value mutex is poisoned.
     pub fn set(&self, key: impl Into<String>, value: impl Serialize) -> Result<()> {
         let v = serde_json::to_value(value)?;
         self.frame.values.lock().unwrap().insert(key.into(), v);
@@ -310,6 +360,10 @@ impl Ctx {
     }
 
     /// Reads a variable: `--var` / [`RunConfig::vars`] first, then the process environment.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the variable is set in neither place.
     pub fn env(&self, key: &str) -> Result<String> {
         self.env_opt(key).ok_or_else(|| {
             anyhow!("variable '{key}' is not set (pass --var {key}=... or export it)")
@@ -328,6 +382,10 @@ impl Ctx {
     }
 
     /// Adds a header to every request made from this scope and its children.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame's header mutex is poisoned.
     pub fn default_header(&self, name: impl Into<String>, value: impl Into<String>) {
         let (name, value) = (name.into(), value.into());
         let mut h = self.frame.headers.lock().unwrap();
@@ -337,12 +395,7 @@ impl Ctx {
 
     /// All default headers visible from this scope (inner scopes win).
     pub(crate) fn default_headers(&self) -> Vec<(String, String)> {
-        let mut chain = vec![];
-        let mut f = Some(&self.frame);
-        while let Some(frame) = f {
-            chain.push(frame.clone());
-            f = frame.parent.as_ref();
-        }
+        let chain: Vec<&Arc<Frame>> = self.frames().collect();
         let mut out: Vec<(String, String)> = vec![];
         for frame in chain.iter().rev() {
             for (n, v) in frame.headers.lock().unwrap().iter() {
@@ -366,6 +419,10 @@ impl Ctx {
     }
 
     /// Type-erased [`Ctx::defer`], used by the scripting frontends.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame's teardown mutex is poisoned.
     pub fn defer_boxed(&self, label: impl Into<String>, f: DeferFn) {
         self.frame.teardown.lock().unwrap().push(Deferred {
             label: label.into(),
@@ -374,6 +431,10 @@ impl Ctx {
     }
 
     /// Looks up a contract registered on the suite.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no contract of that name is registered.
     pub fn contract(&self, name: &str) -> Result<Arc<Contract>> {
         self.shared
             .contracts
@@ -402,11 +463,13 @@ impl Ctx {
                 errors.push(format!("cleanup '{}' in {}: {e:#}", d.label, self.path()));
             }
         }
+
         errors
     }
 }
 
 tokio::task_local! {
+    /// The context of the fixture, hook, test or cleanup running on this task.
     static CURRENT: Ctx;
 }
 
@@ -415,6 +478,11 @@ tokio::task_local! {
 /// This is what lets [`crate::dsl::Actor`]s, [`crate::dsl::step`], [`crate::dsl::undo`]
 /// etc. work without passing `cx` around. Tasks you `tokio::spawn` yourself do not
 /// inherit it; pass `cx` explicitly there.
+///
+/// # Errors
+///
+/// Fails when called outside a fixture, hook, test or cleanup (or on a task
+/// spawned from one).
 pub fn current() -> Result<Ctx> {
     CURRENT.try_with(Ctx::clone).map_err(|_| {
         anyhow!("no apitest context on this task (are you inside a fixture, hook, test or cleanup? tasks you spawn yourself need an explicit `cx`)")
@@ -428,17 +496,18 @@ impl Ctx {
     }
 
     /// Records a finished step on the innermost test scope.
+    ///
+    /// Outside a test (fixtures, suite hooks) the step lands on the run frame.
     pub(crate) fn record_step(&self, step: crate::report::StepReport) {
-        let mut f = Some(&self.frame);
-        while let Some(frame) = f {
-            if frame.scope == Scope::Test || frame.parent.is_none() {
-                frame.steps.lock().unwrap().push(step);
-                return;
-            }
-            f = frame.parent.as_ref();
+        if let Some(frame) = self
+            .frames()
+            .find(|frame| frame.scope == Scope::Test || frame.parent.is_none())
+        {
+            frame.steps.lock().unwrap().push(step);
         }
     }
 
+    /// Removes and returns the steps recorded on this context's own frame.
     pub(crate) fn take_steps(&self) -> Vec<crate::report::StepReport> {
         std::mem::take(&mut *self.frame.steps.lock().unwrap())
     }
@@ -453,6 +522,9 @@ where
     guarded_value(cx, fut, timeout).await
 }
 
+/// [`guarded`] for futures that produce a value (fixture setups).
+///
+/// On timeout the task is aborted, so it stops at its next `.await`.
 pub(crate) async fn guarded_value<T, F>(cx: &Ctx, fut: F, timeout: Duration) -> Result<T>
 where
     T: Send + 'static,
@@ -466,15 +538,18 @@ where
             Err(anyhow!("timed out after {timeout:?}"))
         }
         Ok(Err(join)) if join.is_panic() => {
-            let payload = join.into_panic();
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(std::string::ToString::to_string)
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic>".into());
-            Err(anyhow!("panicked: {msg}"))
+            Err(anyhow!("panicked: {}", panic_message(&*join.into_panic())))
         }
         Ok(Err(join)) => Err(anyhow!("task failed: {join}")),
         Ok(Ok(r)) => r,
     }
+}
+
+/// The message of a panic payload (`&str` or `String`), or a placeholder.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(std::string::ToString::to_string)
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic>".into())
 }

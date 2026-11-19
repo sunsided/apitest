@@ -19,6 +19,7 @@ pub type BoxFut<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 /// A type-erased async callback receiving a [`Ctx`].
 pub type CtxFn<T> = Arc<dyn Fn(Ctx) -> BoxFut<T> + Send + Sync>;
 
+/// Wraps a fixture setup into a [`CtxFn`] that stores its result as JSON.
 fn value_fn<T, F, Fut>(f: F) -> CtxFn<Value>
 where
     T: Serialize,
@@ -47,9 +48,13 @@ where
 /// read the value via `cx.get(name)`.
 #[derive(Clone)]
 pub struct Fixture {
+    /// Key the value is stored under; tests read it with `cx.get(name)`.
     pub name: String,
+    /// Which scope the value lives in: set up once per run, suite, VU or test.
     pub scope: Scope,
+    /// Produces the value (serialized to JSON).
     pub setup: CtxFn<Value>,
+    /// Runs when the scope ends, only if `setup` succeeded.
     pub teardown: Option<CtxFn<()>>,
 }
 
@@ -68,6 +73,7 @@ pub enum Concurrency {
 /// Per-test options.
 #[derive(Clone, Default)]
 pub struct TestOpts {
+    /// Whether the test may overlap with other tests. Default: serial.
     pub concurrency: Concurrency,
     /// Named locks. Parallel tests that share a resource name never overlap.
     pub resources: Vec<String>,
@@ -77,10 +83,12 @@ pub struct TestOpts {
     pub setup: Option<CtxFn<()>>,
     /// Runs after this test's body (before `after_each`), even if the body failed.
     pub teardown: Option<CtxFn<()>>,
+    /// Free-form labels. Stored with the test; the runner does not interpret them.
     pub tags: Vec<String>,
 }
 
 impl TestOpts {
+    /// Options for a test that may run concurrently with other parallel tests.
     #[must_use]
     pub fn parallel() -> Self {
         TestOpts {
@@ -88,23 +96,36 @@ impl TestOpts {
             ..Default::default()
         }
     }
+
+    /// Options for a test that runs alone (the default).
     #[must_use]
     pub fn serial() -> Self {
         TestOpts::default()
     }
+
+    /// Adds a named lock; see [`TestOpts::resources`].
+    #[must_use]
     pub fn resource(mut self, name: impl Into<String>) -> Self {
         self.resources.push(name.into());
         self
     }
+
+    /// Overrides the run's test timeout for this test.
     #[must_use]
     pub fn timeout(mut self, t: std::time::Duration) -> Self {
         self.timeout = Some(t);
         self
     }
+
+    /// Adds a tag.
+    #[must_use]
     pub fn tag(mut self, t: impl Into<String>) -> Self {
         self.tags.push(t.into());
         self
     }
+
+    /// Sets the per-test setup; see [`TestOpts::setup`](field@TestOpts::setup).
+    #[must_use]
     pub fn setup<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -113,6 +134,9 @@ impl TestOpts {
         self.setup = Some(ctx_fn(f));
         self
     }
+
+    /// Sets the per-test teardown; see [`TestOpts::teardown`](field@TestOpts::teardown).
+    #[must_use]
     pub fn teardown<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -126,20 +150,27 @@ impl TestOpts {
 /// One test case.
 #[derive(Clone)]
 pub struct TestCase {
+    /// Display name, unique within the suite.
     pub name: String,
     /// Stable id used by the libtest harness (e.g. `billing::create_invoice` for
     /// macro-registered tests). Defaults to `suite::name`.
     pub id: Option<String>,
+    /// Concurrency, resources, timeout, per-test hooks and tags.
     pub opts: TestOpts,
+    /// The test itself; runs in the test scope.
     pub body: CtxFn<()>,
 }
 
 /// Lifecycle hooks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookKind {
+    /// Once per suite, after suite fixtures and before any test.
     BeforeAll,
+    /// Once per suite, after all tests; runs even if setup or tests failed.
     AfterAll,
+    /// Before every test, after its test fixtures.
     BeforeEach,
+    /// After every test, even if the test failed.
     AfterEach,
 }
 
@@ -172,12 +203,20 @@ impl std::str::FromStr for HookKind {
 ///
 /// Teardown steps always run, even if the corresponding setup step, the body or
 /// an earlier teardown failed. Serial tests run alone; parallel tests overlap.
+///
+/// The builder methods take closures; the `add_*` methods are their type-erased
+/// counterparts for the scripting frontends.
 #[derive(Clone)]
 pub struct Suite {
+    /// Suite name, used in reports, scope paths and default test ids.
     pub name: String,
+    /// Contracts tests can call by name.
     pub contracts: Vec<Arc<Contract>>,
+    /// Fixtures of all scopes, in registration order (also their setup order).
     pub fixtures: Vec<Fixture>,
+    /// Hooks in registration order; hooks of one kind run in that order.
     pub hooks: Vec<(HookKind, CtxFn<()>)>,
+    /// Tests in registration order.
     pub tests: Vec<TestCase>,
     /// Headers for every request of this suite (e.g. a suite-specific `User-Agent`).
     pub headers: Vec<(String, String)>,
@@ -188,6 +227,8 @@ pub struct Suite {
 }
 
 impl Suite {
+    /// An empty suite.
+    #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Suite {
             name: name.into(),
@@ -202,11 +243,13 @@ impl Suite {
     }
 
     /// `User-Agent` for every request of this suite (overrides the run default).
+    #[must_use]
     pub fn user_agent(self, ua: impl Into<String>) -> Self {
         self.header("User-Agent", ua)
     }
 
     /// A header for every request of this suite.
+    #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
@@ -226,12 +269,17 @@ impl Suite {
     }
 
     /// Binds a pinned contract to this suite. Tests reach it via `cx.call("<name>", "<operationId>")`.
+    #[must_use]
     pub fn contract(mut self, contract: Contract) -> Self {
         self.add_contract(contract);
         self
     }
 
     /// Loads and binds a pinned contract from a spec file.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the spec file cannot be read or parsed.
     pub fn pinned(self, name: &str, spec: impl AsRef<Path>) -> Result<Self> {
         Ok(self.contract(Contract::pinned(name, spec)?))
     }
@@ -239,6 +287,7 @@ impl Suite {
     /// Adds a fixture: `setup` runs when the scope starts and its return value is
     /// visible to everything inside that scope via `cx.get(name)`. Register the
     /// matching cleanup with `cx.defer(...)` inside `setup`.
+    #[must_use]
     pub fn fixture<T, F, Fut>(mut self, name: &str, scope: Scope, setup: F) -> Self
     where
         T: Serialize,
@@ -251,6 +300,7 @@ impl Suite {
 
     /// Like [`Suite::fixture`] with an explicit teardown. The teardown runs when the
     /// fixture's scope ends (LIFO with other cleanups) and only if `setup` succeeded.
+    #[must_use]
     pub fn fixture_with_teardown<T, F, Fut, G, GFut>(
         mut self,
         name: &str,
@@ -270,6 +320,7 @@ impl Suite {
     }
 
     /// Suite setup (alias for `before_all`).
+    #[must_use]
     pub fn setup<F, Fut>(self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -279,6 +330,7 @@ impl Suite {
     }
 
     /// Suite teardown (alias for `after_all`). Runs even if setup or tests failed.
+    #[must_use]
     pub fn teardown<F, Fut>(self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -287,6 +339,8 @@ impl Suite {
         self.after_all(f)
     }
 
+    /// Adds a [`HookKind::BeforeAll`] hook.
+    #[must_use]
     pub fn before_all<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -296,6 +350,8 @@ impl Suite {
         self
     }
 
+    /// Adds a [`HookKind::AfterAll`] hook.
+    #[must_use]
     pub fn after_all<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -305,6 +361,8 @@ impl Suite {
         self
     }
 
+    /// Adds a [`HookKind::BeforeEach`] hook.
+    #[must_use]
     pub fn before_each<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -314,6 +372,8 @@ impl Suite {
         self
     }
 
+    /// Adds a [`HookKind::AfterEach`] hook.
+    #[must_use]
     pub fn after_each<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -323,6 +383,8 @@ impl Suite {
         self
     }
 
+    /// Adds a serial test with default options.
+    #[must_use]
     pub fn test<F, Fut>(mut self, name: &str, body: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -333,6 +395,7 @@ impl Suite {
     }
 
     /// A test with options (concurrency, resources, timeout, per-test setup/teardown).
+    #[must_use]
     pub fn test_with<F, Fut>(mut self, name: &str, opts: TestOpts, body: F) -> Self
     where
         F: Fn(Ctx) -> Fut + Send + Sync + 'static,
@@ -342,12 +405,12 @@ impl Suite {
         self
     }
 
-    // --- type-erased variants, used by the scripting frontends ---
-
+    /// Type-erased [`Suite::contract`].
     pub fn add_contract(&mut self, contract: Contract) {
         self.contracts.push(Arc::new(contract));
     }
 
+    /// Type-erased [`Suite::fixture_with_teardown`] (`teardown` optional).
     pub fn add_fixture(
         &mut self,
         name: &str,
@@ -363,10 +426,12 @@ impl Suite {
         });
     }
 
+    /// Type-erased hook registration ([`Suite::before_all`] and friends).
     pub fn add_hook(&mut self, kind: HookKind, f: CtxFn<()>) {
         self.hooks.push((kind, f));
     }
 
+    /// Type-erased [`Suite::test_with`].
     pub fn add_test(&mut self, name: &str, opts: TestOpts, body: CtxFn<()>) {
         self.tests.push(TestCase {
             name: name.into(),
@@ -378,8 +443,12 @@ impl Suite {
 
     /// Like [`Suite::add_test`] with an explicit harness id.
     pub fn add_test_with_id(&mut self, id: &str, name: &str, opts: TestOpts, body: CtxFn<()>) {
-        self.add_test(name, opts, body);
-        self.tests.last_mut().expect("just pushed").id = Some(id.into());
+        self.tests.push(TestCase {
+            name: name.into(),
+            id: Some(id.into()),
+            opts,
+            body,
+        });
     }
 
     /// The id the harness reports this test under.
@@ -389,10 +458,12 @@ impl Suite {
             .unwrap_or_else(|| format!("{}::{}", self.name, t.name))
     }
 
+    /// Keeps `resource` alive as long as the suite (or a clone of it) exists.
     pub fn keep_alive(&mut self, resource: Arc<dyn Any + Send + Sync>) {
         self.keepalive.push(resource);
     }
 
+    /// The hooks of one kind, in registration order.
     pub(crate) fn hooks(&self, kind: HookKind) -> impl Iterator<Item = &CtxFn<()>> {
         self.hooks
             .iter()
@@ -400,6 +471,7 @@ impl Suite {
             .map(|(_, f)| f)
     }
 
+    /// The fixtures of one scope, in registration order.
     pub(crate) fn fixtures_for(&self, scope: Scope) -> impl Iterator<Item = &Fixture> {
         self.fixtures.iter().filter(move |f| f.scope == scope)
     }

@@ -1,13 +1,17 @@
 //! Authentication as data.
 //!
-//! ```ignore
-//! Actor::on("hub").bearer(token)                       // static token
-//! Actor::on("hub").basic("user", "pw")                 // HTTP Basic
-//! Actor::on("hub").api_key("X-Api-Key", key)           // any header
-//! Actor::on("hub").login("admin@hub.test", "secret")   // lazy login via the service's LoginFlow
-//! Actor::on("reports").client_credentials(ClientCredentials::new(token_url, id, secret))
-//! actor("hub_admin")?                                  // named actor from apitest.nova / RunConfig
-//! cx.bearer(token);                                    // everything in this scope
+//! ```no_run
+//! # use apitest::prelude::*;
+//! # fn demo(cx: &Ctx, token: &str, key: &str, token_url: &str, id: &str, secret: &str) -> Result<()> {
+//! let static_token = Actor::on("hub").bearer(token);
+//! let basic = Actor::on("hub").basic("user", "pw");
+//! let any_header = Actor::on("hub").api_key("X-Api-Key", key);
+//! let lazy_login = Actor::on("hub").login("admin@hub.test", "secret"); // via the service's LoginFlow
+//! let oauth = Actor::on("reports").client_credentials(ClientCredentials::new(token_url, id, secret));
+//! let named = actor("hub_admin")?; // from apitest.nova / RunConfig
+//! cx.bearer(token); // everything in this scope
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Dynamic credentials (`login`, `client_credentials`) are resolved when a request
@@ -16,6 +20,7 @@
 //! service answers `401` (e.g. because a test revoked the token).
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -24,24 +29,45 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::context::Ctx;
-use crate::http::Request;
+use crate::http::{Request, Response};
 
 /// How an actor authenticates.
+///
+/// String fields may contain `${NAME}` placeholders; they are resolved from run
+/// variables or the environment when a request is sent (see [`interpolate`]).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Auth {
+    /// No credentials of its own: the request falls back to the scope's auth, or
+    /// goes out unauthenticated.
     #[default]
     None,
     /// `Authorization: Bearer <token>`.
-    Bearer { token: String },
+    Bearer {
+        /// The token, without the `Bearer ` prefix.
+        token: String,
+    },
     /// `Authorization: Basic base64(username:password)`.
-    Basic { username: String, password: String },
+    Basic {
+        /// User name; must not contain `:`.
+        username: String,
+        /// Password, sent base64-encoded (not encrypted).
+        password: String,
+    },
     /// Any header, e.g. `X-Api-Key: …`.
-    Header { name: String, value: String },
+    Header {
+        /// Header name, sent as given.
+        name: String,
+        /// Header value, sent as given.
+        value: String,
+    },
     /// Username/password exchanged for a token via the service's [`LoginFlow`].
     Login {
+        /// Service to log in on; `None` means the actor's service.
         service: Option<String>,
+        /// Substituted for `{username}` in the login body.
         username: String,
+        /// Substituted for `{password}` in the login body.
         password: String,
     },
     /// OAuth 2.0 client-credentials grant.
@@ -49,23 +75,34 @@ pub enum Auth {
 }
 
 impl Auth {
+    /// `Authorization: Bearer <token>`.
+    #[must_use]
     pub fn bearer(token: impl Into<String>) -> Auth {
         Auth::Bearer {
             token: token.into(),
         }
     }
+
+    /// HTTP Basic auth.
+    #[must_use]
     pub fn basic(username: impl Into<String>, password: impl Into<String>) -> Auth {
         Auth::Basic {
             username: username.into(),
             password: password.into(),
         }
     }
+
+    /// The credential as an arbitrary header (`X-Api-Key`, ...).
+    #[must_use]
     pub fn header(name: impl Into<String>, value: impl Into<String>) -> Auth {
         Auth::Header {
             name: name.into(),
             value: value.into(),
         }
     }
+
+    /// A lazy login on `service` through its [`LoginFlow`].
+    #[must_use]
     pub fn login(service: &str, username: impl Into<String>, password: impl Into<String>) -> Auth {
         Auth::Login {
             service: Some(service.into()),
@@ -74,11 +111,15 @@ impl Auth {
         }
     }
 
+    /// Whether the header comes from a request to another endpoint (login or
+    /// token), so it is cached and may need re-acquiring after a `401`.
     pub(crate) fn is_dynamic(&self) -> bool {
         matches!(self, Auth::Login { .. } | Auth::ClientCredentials(_))
     }
 
     /// Replaces `${NAME}` in all string fields with variables / environment values.
+    ///
+    /// Header names and the login service are taken literally.
     pub(crate) fn interpolated(&self, cx: &Ctx) -> Result<Auth> {
         let i = |s: &String| interpolate(s, cx);
         Ok(match self {
@@ -116,11 +157,16 @@ impl Auth {
 /// OAuth 2.0 client credentials (RFC 6749 §4.4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientCredentials {
+    /// Absolute URL of the token endpoint (not resolved against a service).
     pub token_url: String,
+    /// OAuth client id.
     pub client_id: String,
+    /// OAuth client secret. Cache keys contain only a hash of it.
     pub client_secret: String,
+    /// Space-separated scopes to request; omitted from the request when `None`.
     #[serde(default)]
     pub scope: Option<String>,
+    /// `audience` parameter some providers require; omitted when `None`.
     #[serde(default)]
     pub audience: Option<String>,
     /// Send the client credentials as HTTP Basic instead of form fields.
@@ -129,6 +175,8 @@ pub struct ClientCredentials {
 }
 
 impl ClientCredentials {
+    /// Credentials sent as form fields, without scope or audience.
+    #[must_use]
     pub fn new(
         token_url: impl Into<String>,
         client_id: impl Into<String>,
@@ -143,10 +191,16 @@ impl ClientCredentials {
             basic_auth: false,
         }
     }
+
+    /// Requests these (space-separated) scopes.
+    #[must_use]
     pub fn scope(mut self, scope: impl Into<String>) -> Self {
         self.scope = Some(scope.into());
         self
     }
+
+    /// Requests a token for this audience.
+    #[must_use]
     pub fn audience(mut self, audience: impl Into<String>) -> Self {
         self.audience = Some(audience.into());
         self
@@ -169,12 +223,14 @@ pub struct LoginFlow {
     pub body: Value,
     /// Send the body as `application/x-www-form-urlencoded` instead of JSON.
     pub form: bool,
-    /// JSON pointer to the token in the response.
+    /// JSON pointer to the token in the response; `/access_token` is the fallback.
     pub token: String,
     /// JSON pointer to the lifetime in seconds, if the service reports one.
+    /// `/expires_in` is the fallback; without either the token is reused for the run.
     pub expires_in: Option<String>,
-    /// Header to put the token in, and its scheme (`None` = raw token).
+    /// Header to put the token in.
     pub header: String,
+    /// Scheme written before the token (`Bearer`); `None` sends the raw token.
     pub scheme: Option<String>,
 }
 
@@ -202,6 +258,7 @@ impl LoginFlow {
             ..Default::default()
         }
     }
+
     /// Login through a raw `POST` path.
     #[must_use]
     pub fn path(path: &str) -> Self {
@@ -211,22 +268,29 @@ impl LoginFlow {
             ..Default::default()
         }
     }
+
     /// Body template; `"{username}"` / `"{password}"` are substituted.
     #[must_use]
     pub fn body(mut self, body: Value) -> Self {
         self.body = body;
         self
     }
+
+    /// Sends the body as form fields instead of JSON (non-string values as JSON text).
     #[must_use]
     pub fn form(mut self) -> Self {
         self.form = true;
         self
     }
+
+    /// Reads the token from this JSON pointer instead of `/token`.
     #[must_use]
     pub fn token_at(mut self, pointer: &str) -> Self {
         self.token = pointer.into();
         self
     }
+
+    /// Reads the token lifetime (seconds) from this JSON pointer.
     #[must_use]
     pub fn expires_at(mut self, pointer: &str) -> Self {
         self.expires_in = Some(pointer.into());
@@ -238,13 +302,22 @@ impl LoginFlow {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ActorConfig {
+    /// Service the actor calls; also the login service when `auth` names none.
     pub service: Option<String>,
+    /// Credentials for every request of the actor.
     pub auth: Auth,
+    /// Extra headers; values may contain `${NAME}` placeholders.
     pub headers: BTreeMap<String, String>,
+    /// `User-Agent` for the actor's requests (taken literally).
     pub user_agent: Option<String>,
 }
 
 /// `${NAME}` → `cx.env("NAME")`; `$${` escapes a literal `${`.
+///
+/// # Errors
+///
+/// Fails when a `${` has no closing `}`, or when a referenced variable is set
+/// neither as a run variable nor in the environment.
 pub fn interpolate(s: &str, cx: &Ctx) -> Result<String> {
     let mut out = String::new();
     let mut rest = s;
@@ -255,6 +328,7 @@ pub fn interpolate(s: &str, cx: &Ctx) -> Result<String> {
             rest = &rest[i + 2..];
             continue;
         }
+
         out.push_str(&rest[..i]);
         let end = rest[i..]
             .find('}')
@@ -263,10 +337,12 @@ pub fn interpolate(s: &str, cx: &Ctx) -> Result<String> {
         out.push_str(&cx.env(name)?);
         rest = &rest[i + end + 1..];
     }
+
     out.push_str(rest);
     Ok(out)
 }
 
+/// Standard base64 (RFC 4648 §4) with `=` padding.
 pub(crate) fn base64(input: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -285,29 +361,40 @@ pub(crate) fn base64(input: &[u8]) -> String {
             }
         }
     }
+
     out
 }
 
+/// An acquired credential header and when to stop reusing it.
 #[derive(Clone)]
 struct Cached {
+    /// Header name and value to send.
     header: (String, String),
+    /// Refresh deadline; `None` means the credential is reused for the whole run.
     expires: Option<Instant>,
 }
 
+/// One cache entry. Its async mutex is held while acquiring, so concurrent
+/// requests for the same identity wait for a single login.
 type Slot = Arc<tokio::sync::Mutex<Option<Cached>>>;
 
+/// Process-wide credential cache, keyed by endpoint + identity (secrets hashed).
 fn cache() -> &'static Mutex<HashMap<String, Slot>> {
     static C: OnceLock<Mutex<HashMap<String, Slot>>> = OnceLock::new();
     C.get_or_init(Default::default)
 }
 
+/// First 8 bytes of SHA-256 as 16 hex digits: keeps secrets out of cache keys.
 fn digest(s: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(s.as_bytes())
         .iter()
         .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::with_capacity(16), |mut out, b| {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 /// The header an [`Auth`] produces for a request. Dynamic credentials are cached;
@@ -321,61 +408,86 @@ pub(crate) async fn resolve(
     match &auth {
         Auth::None => Ok(None),
         Auth::Bearer { token } => Ok(Some(("Authorization".into(), format!("Bearer {token}")))),
-        Auth::Basic { username, password } => Ok(Some((
-            "Authorization".into(),
-            format!(
-                "Basic {}",
-                base64(format!("{username}:{password}").as_bytes())
-            ),
-        ))),
+        Auth::Basic { username, password } => Ok(Some(basic_header(username, password))),
         Auth::Header { name, value } => Ok(Some((name.clone(), value.clone()))),
         Auth::Login {
             service,
             username,
             password,
-        } => {
-            let service = service.clone().ok_or_else(|| {
-                anyhow!("login as '{username}': no service (use Actor::on(service).login(..))")
-            })?;
-            let flow = cx.config().auth.get(&service).cloned().unwrap_or_default();
-            let base = cx
-                .config()
-                .service_url(Some(&service))
-                .unwrap_or(&cx.config().base_url)
-                .to_string();
-            let key = format!(
-                "login|{base}|{service}|{username}|{}|{}",
-                digest(password),
-                digest(&serde_json::to_string(&flow)?)
-            );
-            cached(&key, refresh, || {
-                login(cx, &service, &flow, username, password)
-            })
+        } => resolve_login(cx, service.as_deref(), username, password, refresh)
             .await
-            .with_context(|| format!("login as '{username}' on '{service}' failed"))
-            .map(Some)
-        }
-        Auth::ClientCredentials(c) => {
-            let key = format!(
-                "cc|{}|{}|{}|{}",
-                c.token_url,
-                c.client_id,
-                c.scope.as_deref().unwrap_or(""),
-                digest(&c.client_secret)
-            );
-            cached(&key, refresh, || client_credentials(cx, c))
-                .await
-                .with_context(|| {
-                    format!(
-                        "client-credentials token for '{}' from {} failed",
-                        c.client_id, c.token_url
-                    )
-                })
-                .map(Some)
-        }
+            .map(Some),
+        Auth::ClientCredentials(c) => resolve_client_credentials(cx, c, refresh).await.map(Some),
     }
 }
 
+/// `Authorization: Basic base64(username:password)`.
+fn basic_header(username: &str, password: &str) -> (String, String) {
+    (
+        "Authorization".into(),
+        format!(
+            "Basic {}",
+            base64(format!("{username}:{password}").as_bytes())
+        ),
+    )
+}
+
+/// A login header from the cache, or from a fresh login through the service's flow.
+async fn resolve_login(
+    cx: &Ctx,
+    service: Option<&str>,
+    username: &str,
+    password: &str,
+    refresh: bool,
+) -> Result<(String, String)> {
+    let service = service.ok_or_else(|| {
+        anyhow!("login as '{username}': no service (use Actor::on(service).login(..))")
+    })?;
+    let flow = cx.config().auth.get(service).cloned().unwrap_or_default();
+    let base = cx
+        .config()
+        .service_url(Some(service))
+        .unwrap_or(&cx.config().base_url)
+        .to_string();
+    let key = format!(
+        "login|{base}|{service}|{username}|{}|{}",
+        digest(password),
+        digest(&serde_json::to_string(&flow)?)
+    );
+
+    cached(&key, refresh, || {
+        login(cx, service, &flow, username, password)
+    })
+    .await
+    .with_context(|| format!("login as '{username}' on '{service}' failed"))
+}
+
+/// A client-credentials header from the cache, or from a fresh token request.
+async fn resolve_client_credentials(
+    cx: &Ctx,
+    c: &ClientCredentials,
+    refresh: bool,
+) -> Result<(String, String)> {
+    let key = format!(
+        "cc|{}|{}|{}|{}",
+        c.token_url,
+        c.client_id,
+        c.scope.as_deref().unwrap_or(""),
+        digest(&c.client_secret)
+    );
+
+    cached(&key, refresh, || client_credentials(cx, c))
+        .await
+        .with_context(|| {
+            format!(
+                "client-credentials token for '{}' from {} failed",
+                c.client_id, c.token_url
+            )
+        })
+}
+
+/// The cached header for `key` while it is fresh (and `refresh` is false),
+/// otherwise the header from `acquire`, which then replaces the cache entry.
 async fn cached<F, Fut>(key: &str, refresh: bool, acquire: F) -> Result<(String, String)>
 where
     F: FnOnce() -> Fut,
@@ -387,6 +499,7 @@ where
         .entry(key.to_string())
         .or_default()
         .clone();
+
     // Single-flight: concurrent requests for the same identity wait for one login.
     let mut guard = slot.lock().await;
     if !refresh
@@ -395,6 +508,7 @@ where
     {
         return Ok(c.header.clone());
     }
+
     let fresh = acquire().await?;
     let header = fresh.header.clone();
     *guard = Some(fresh);
@@ -409,6 +523,7 @@ fn expiry(seconds: Option<u64>) -> Option<Instant> {
     })
 }
 
+/// Replaces `{username}` / `{password}` in every string of a JSON template.
 fn substitute(v: &Value, username: &str, password: &str) -> Value {
     match v {
         Value::String(s) => Value::String(
@@ -429,6 +544,7 @@ fn substitute(v: &Value, username: &str, password: &str) -> Value {
     }
 }
 
+/// Logs in through `flow` and extracts the token header and its expiry.
 async fn login(
     cx: &Ctx,
     service: &str,
@@ -437,30 +553,9 @@ async fn login(
     password: &str,
 ) -> Result<Cached> {
     let body = substitute(&flow.body, username, password);
-    let mut req = match (&flow.operation, &flow.path) {
-        (Some(op), _) if cx.contract(service).is_ok() => {
-            Request::op(Some(cx.clone()), Some(service.to_string()), op)
-        }
-        (_, Some(path)) => Request::raw(Some(cx.clone()), "POST", path).service(service),
-        (Some(op), None) => bail!(
-            "service '{service}' has no contract with operation '{op}'; set `path` in its login flow"
-        ),
-        (None, None) => bail!("login flow for '{service}' has neither `operation` nor `path`"),
-    };
-    req = if flow.form {
-        let fields: Vec<(String, String)> = body
-            .as_object()
-            .map(|o| {
-                o.iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            v.as_str().map_or_else(|| v.to_string(), str::to_string),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+    let req = login_request(cx, service, flow)?;
+    let req = if flow.form {
+        let fields = form_fields(&body);
         let refs: Vec<(&str, &str)> = fields
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -469,14 +564,8 @@ async fn login(
     } else {
         req.json(body)
     };
-    let resp = req.await?;
-    if !(200..300).contains(&resp.status) {
-        bail!(
-            "status {}: {}",
-            resp.status,
-            resp.text.chars().take(300).collect::<String>()
-        );
-    }
+
+    let resp = ensure_success(req.await?)?;
     let token: String = resp
         .get(&flow.token)
         .or_else(|_| resp.get("/access_token"))
@@ -490,36 +579,48 @@ async fn login(
         Some(s) => format!("{s} {token}"),
         None => token,
     };
+
     Ok(Cached {
         header: (flow.header.clone(), value),
         expires: expiry(lifetime),
     })
 }
 
-async fn client_credentials(cx: &Ctx, c: &ClientCredentials) -> Result<Cached> {
-    let mut fields = vec![("grant_type", "client_credentials".to_string())];
-    if !c.basic_auth {
-        fields.push(("client_id", c.client_id.clone()));
-        fields.push(("client_secret", c.client_secret.clone()));
+/// The login request without a body: the contract operation if the service has
+/// a contract, else the raw `POST` path.
+fn login_request(cx: &Ctx, service: &str, flow: &LoginFlow) -> Result<Request<'static>> {
+    match (&flow.operation, &flow.path) {
+        (Some(op), _) if cx.contract(service).is_ok() => {
+            Ok(Request::op(Some(cx.clone()), Some(service.to_string()), op))
+        }
+        (_, Some(path)) => Ok(Request::raw(Some(cx.clone()), "POST", path).service(service)),
+        (Some(op), None) => bail!(
+            "service '{service}' has no contract with operation '{op}'; set `path` in its login flow"
+        ),
+        (None, None) => bail!("login flow for '{service}' has neither `operation` nor `path`"),
     }
-    if let Some(s) = &c.scope {
-        fields.push(("scope", s.clone()));
-    }
-    if let Some(a) = &c.audience {
-        fields.push(("audience", a.clone()));
-    }
-    let refs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let mut req = Request::raw(Some(cx.clone()), "POST", &c.token_url).form(&refs);
-    if c.basic_auth {
-        req = req.header(
-            "Authorization",
-            format!(
-                "Basic {}",
-                base64(format!("{}:{}", c.client_id, c.client_secret).as_bytes())
-            ),
-        );
-    }
-    let resp = req.await?;
+}
+
+/// The top-level fields of a JSON object as form fields (strings unquoted, the
+/// rest as JSON text). Anything but an object yields no fields.
+fn form_fields(body: &Value) -> Vec<(String, String)> {
+    body.as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_str().map_or_else(|| v.to_string(), str::to_string),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Passes 2xx responses through; anything else fails with the status and the
+/// first 300 characters of the body.
+fn ensure_success(resp: Response) -> Result<Response> {
     if !(200..300).contains(&resp.status) {
         bail!(
             "status {}: {}",
@@ -527,6 +628,34 @@ async fn client_credentials(cx: &Ctx, c: &ClientCredentials) -> Result<Cached> {
             resp.text.chars().take(300).collect::<String>()
         );
     }
+
+    Ok(resp)
+}
+
+/// Requests a token with the client-credentials grant.
+async fn client_credentials(cx: &Ctx, c: &ClientCredentials) -> Result<Cached> {
+    let mut fields = vec![("grant_type", "client_credentials".to_string())];
+    if !c.basic_auth {
+        fields.push(("client_id", c.client_id.clone()));
+        fields.push(("client_secret", c.client_secret.clone()));
+    }
+
+    if let Some(s) = &c.scope {
+        fields.push(("scope", s.clone()));
+    }
+
+    if let Some(a) = &c.audience {
+        fields.push(("audience", a.clone()));
+    }
+
+    let refs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut req = Request::raw(Some(cx.clone()), "POST", &c.token_url).form(&refs);
+    if c.basic_auth {
+        let (name, value) = basic_header(&c.client_id, &c.client_secret);
+        req = req.header(&name, value);
+    }
+
+    let resp = ensure_success(req.await?)?;
     let token: String = resp.get("/access_token")?;
     let kind = resp
         .get::<String>("/token_type")
@@ -537,6 +666,7 @@ async fn client_credentials(cx: &Ctx, c: &ClientCredentials) -> Result<Cached> {
     } else {
         kind
     };
+
     Ok(Cached {
         header: ("Authorization".into(), format!("{kind} {token}")),
         expires: expiry(resp.get::<u64>("/expires_in").ok()),
