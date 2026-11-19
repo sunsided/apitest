@@ -70,17 +70,9 @@ name = "it"
 required-features = ["load"]
 
 [[test]]
-name = "scenarios"
-required-features = ["axum", "load", "rhai", "js"]
-
-[[test]]
 name = "macro_harness"
 harness = false
 required-features = ["harness", "macros", "axum"]
-
-[[test]]
-name = "headers"
-required-features = ["axum", "rhai", "js"]
 
 [[test]]
 name = "care_flow"

@@ -1,9 +1,9 @@
 //! Behavioural tests of the runner: contract drift, guaranteed cleanup,
 //! scheduling, lockfile, reports and load.
 
-#[path = "support/demo_server.rs"]
+#[path = "../support/demo_server.rs"]
 mod demo;
-#[path = "support/rust_suite.rs"]
+#[path = "../support/rust_suite.rs"]
 mod rust_suite;
 
 use std::sync::Arc;
