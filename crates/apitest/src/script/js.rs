@@ -465,7 +465,9 @@ fn evaluate_script(context: &Context, src: &str) -> Result<String> {
         ctx.globals()
             .set(
                 "__print",
-                Function::new(ctx.clone(), |m: String| eprintln!("  [js] {m}"))?,
+                Function::new(ctx.clone(), |m: String| {
+                    eprintln!("{}", crate::redact::console(&format!("  [js] {m}")));
+                })?,
             )
             .map_err(|e| js_error(&ctx, &e))?;
         ctx.eval::<(), _>(PRELUDE)

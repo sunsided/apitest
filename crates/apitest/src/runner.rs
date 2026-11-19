@@ -12,8 +12,10 @@
 //!     td --> lock[update lockfile]
 //! ```
 
+mod drift;
+mod vars;
+
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -24,9 +26,10 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::context::{Ctx, Scope, Shared, guarded, guarded_value};
-use crate::contract::{
-    Contract, DriftReport, Finding, LiveSpec, LockedContract, Lockfile, OpUsage, Severity, Spec,
-};
+pub use drift::check_drift;
+pub(crate) use drift::drift_failure;
+
+use crate::contract::{Contract, DriftReport, DriftTarget, Lockfile};
 use crate::report::{Outcome, StepReport, SuiteReport, TestReport};
 use crate::suite::{Concurrency, HookKind, Suite, TestCase};
 
@@ -38,8 +41,16 @@ pub struct RunConfig {
     /// Named services (`hub`, `app`, `mail`, ...) → base URL. Contracts and actors
     /// bound to a service send their requests there.
     pub services: BTreeMap<String, String>,
-    /// Variables visible through `cx.env(..)` (take precedence over the process environment).
+    /// Variables visible through `cx.env(..)` and `${NAME}` (`--var`). They win
+    /// over every other source; see [`RunConfig::lookup`] for the order.
     pub vars: BTreeMap<String, String>,
+    /// Variables read from `.env` files ([`RunConfig::env_file`]). The process
+    /// environment wins over them.
+    pub env_file_vars: BTreeMap<String, String>,
+    /// Defaults (`vars:` in `apitest.nova`), used when no other source has the name.
+    pub var_defaults: BTreeMap<String, String>,
+    /// Masks secrets and patterns in logs, errors and reports. Clones share it.
+    pub redactor: crate::redact::Redactor,
     /// Timeout for a test body, unless the test sets its own (default: 30 s).
     pub test_timeout: Duration,
     /// Timeout for each fixture setup, hook and cleanup.
@@ -50,8 +61,16 @@ pub struct RunConfig {
     pub lockfile: Option<PathBuf>,
     /// Merge this run's contract usage into the lockfile afterwards.
     pub update_lock: bool,
-    /// Fail the suite before running tests if the live spec broke the used surface.
+    /// Fail the suite before running tests if a compared spec broke the used surface.
     pub check_drift: bool,
+    /// Named comparison specs (`dev`, `qa`, `prod`, `branch`, ...), each with a file
+    /// or URL per contract, to diff the pins against instead of or besides the live
+    /// spec. The names `live` and `all` are reserved.
+    pub drift_targets: BTreeMap<String, DriftTarget>,
+    /// Which targets the drift check compares against, in order: `live` (each
+    /// contract's own live spec), names from [`RunConfig::drift_targets`], or `all`
+    /// (live plus every named target). Empty means `["live"]`.
+    pub drift_against: Vec<String>,
     /// Only run tests whose name contains one of these substrings (empty = all).
     pub only: Vec<String>,
     /// Upper bound for concurrently running `parallel` tests.
@@ -79,12 +98,17 @@ impl Default for RunConfig {
             base_url: "http://127.0.0.1:8080".into(),
             services: BTreeMap::new(),
             vars: BTreeMap::new(),
+            env_file_vars: BTreeMap::new(),
+            var_defaults: BTreeMap::new(),
+            redactor: crate::redact::Redactor::default(),
             test_timeout: Duration::from_secs(30),
             hook_timeout: Duration::from_secs(30),
             validate_every: 1,
             lockfile: None,
             update_lock: false,
             check_drift: true,
+            drift_targets: BTreeMap::new(),
+            drift_against: vec![],
             only: vec![],
             max_parallel: std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
             quiet: false,
@@ -201,7 +225,8 @@ impl RunConfig {
         }
     }
 
-    /// Sets a variable visible through `cx.env(..)`, shadowing the process environment.
+    /// An explicit variable, like `--var k=v`; it wins over every other source
+    /// (see [`RunConfig::lookup`]).
     #[must_use]
     pub fn var(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.vars.insert(k.into(), v.into());
@@ -242,6 +267,19 @@ pub(crate) fn make_shared(suite: &Suite, cfg: &RunConfig) -> Result<Arc<Shared>>
     let http = reqwest::Client::builder()
         .build()
         .context("building HTTP client")?;
+
+    make_shared_with(suite, cfg, http)
+}
+
+/// [`make_shared`] with a ready-made HTTP client.
+///
+/// # Errors
+///
+/// Fails if a variable the configured actors use does not resolve (see
+/// [`RunConfig::check_variables`]) or the trace parent is malformed.
+fn make_shared_with(suite: &Suite, cfg: &RunConfig, http: reqwest::Client) -> Result<Arc<Shared>> {
+    cfg.redactor.activate();
+    cfg.check_variables()?;
     let mut config = cfg.clone();
     if let Some(t) = &suite.tracing {
         config.tracing = t.clone();
@@ -263,190 +301,77 @@ pub(crate) fn make_shared(suite: &Suite, cfg: &RunConfig) -> Result<Arc<Shared>>
     }))
 }
 
-/// Fetches live specs and diffs them against the pinned ones.
+impl Ctx {
+    /// A run-scope context outside any suite: no contracts, no fixtures, nothing
+    /// deferred.
+    ///
+    /// For one-off requests such as the CLI's `apitest call`. Requests sent
+    /// through it still get the run's User-Agent, tracing, services, vars and
+    /// named actors from `cfg`.
+    ///
+    /// Redirects are followed only within the origin (scheme, host and port) of
+    /// the request, at most 10 times. A redirect to another origin is returned as
+    /// the response instead: following it would send an actor's API-key or
+    /// configured headers, which the HTTP client only strips for `Authorization`
+    /// and cookies, to that host. That includes an `http` to `https` upgrade of
+    /// the same host; configure the `https` URL instead.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the HTTP client cannot be built or the configured trace parent is
+    /// malformed.
+    pub fn standalone(cfg: &RunConfig) -> Result<Ctx> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(same_origin_redirect))
+            .build()
+            .context("building HTTP client")?;
+
+        Ok(Ctx::root(make_shared_with(
+            &Suite::new("standalone"),
+            cfg,
+            http,
+        )?))
+    }
+}
+
+/// Redirect policy of [`Ctx::standalone`]; the decision is [`redirect_decision`].
+fn same_origin_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+    match redirect_decision(attempt.previous(), attempt.url()) {
+        Ok(true) => attempt.follow(),
+        Ok(false) => attempt.stop(),
+        Err(e) => attempt.error(e),
+    }
+}
+
+/// Whether to follow a redirect to `next`: `Ok(true)` while it stays on the
+/// origin (scheme, host and port) of the first request and at most 10 were
+/// followed, `Ok(false)` to return the 3xx instead.
 ///
-/// Contracts without a live spec are skipped. With a lockfile whose pin matches,
-/// only the recorded used surface is checked; otherwise every operation. With
-/// [`RunConfig::drift_cache`] set, results are read from and written to that
-/// directory so concurrent processes of one run diff each contract only once.
+/// `previous` is every URL requested so far, the first request's URL first
+/// (reqwest pushes the current URL before asking the policy). An `http` to
+/// `https` upgrade on the same host is a different origin, so it is not
+/// followed: reqwest drops `Authorization` on a scheme change but keeps an
+/// API-key header, so a followed upgrade would authenticate some actors and
+/// not others.
 ///
 /// # Errors
 ///
-/// Fails if the lockfile cannot be read or parsed, a contract's service is unknown, the live
-/// spec cannot be fetched or parsed, or a result cannot be serialized for the cache.
-pub async fn check_drift(contracts: &[Arc<Contract>], cfg: &RunConfig) -> Result<Vec<DriftReport>> {
-    let lock = match &cfg.lockfile {
-        Some(p) => Lockfile::load(p)?,
-        None => None,
+/// Fails after 10 redirects, and when `previous` is empty, so a change in
+/// reqwest can't silently disable redirects or the origin check.
+fn redirect_decision(previous: &[reqwest::Url], next: &reqwest::Url) -> Result<bool, &'static str> {
+    let Some(first) = previous.first() else {
+        return Err("redirect without the URL of the original request");
     };
-    let http = reqwest::Client::new();
 
-    let mut out = vec![];
-    for c in contracts {
-        let Some(live) = &c.live_spec else { continue };
-        let locked = lock.as_ref().and_then(|l| l.contract.get(&c.name));
-        out.push(contract_drift(c, live, locked, cfg, &http).await?);
+    if first.origin() != next.origin() {
+        return Ok(false);
     }
 
-    Ok(out)
-}
-
-/// Drift report of one contract, from the cache if possible.
-async fn contract_drift(
-    c: &Contract,
-    live: &LiveSpec,
-    locked: Option<&LockedContract>,
-    cfg: &RunConfig,
-    http: &reqwest::Client,
-) -> Result<DriftReport> {
-    let (used, notes) = used_surface(c, locked);
-    let cache_file = cfg.drift_cache.as_ref().map(|dir| {
-        dir.join(format!(
-            "drift-{}.json",
-            drift_cache_key(c, live, used, cfg)
-        ))
-    });
-    if let Some(cached) = cache_file.as_deref().and_then(read_cached_drift) {
-        return Ok(cached);
+    if previous.len() > 10 {
+        return Err("too many redirects");
     }
 
-    let (spec, source) = fetch_live_spec(c, live, cfg, http).await?;
-    let mut report = c.diff(&spec, used, &source);
-    report.findings.splice(0..0, notes);
-    if let Some(file) = &cache_file {
-        write_cached_drift(file, &report)?;
-    }
-
-    Ok(report)
-}
-
-/// The used surface to check, from the lockfile if its pin matches the contract's.
-///
-/// A stale lockfile entry yields `None` (check everything) plus an info finding
-/// explaining why.
-fn used_surface<'a>(
-    c: &Contract,
-    locked: Option<&'a LockedContract>,
-) -> (Option<&'a [OpUsage]>, Vec<Finding>) {
-    match locked {
-        Some(l) if l.sha256 == c.pinned.sha256 => (Some(l.used.as_slice()), vec![]),
-        Some(l) => {
-            let note = Finding {
-                severity: Severity::Info,
-                operation: "-".into(),
-                location: "lockfile".into(),
-                message: format!(
-                    "pinned spec changed since the lockfile was written (lock: v{}, now: v{}); checking all operations",
-                    l.version, c.pinned.version
-                ),
-            };
-            (None, vec![note])
-        }
-        None => (None, vec![]),
-    }
-}
-
-/// A cached drift report, if `file` exists and parses.
-fn read_cached_drift(file: &Path) -> Option<DriftReport> {
-    let bytes = std::fs::read(file).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// Caches a drift report. I/O failures are ignored: the cache is an optimization.
-///
-/// # Errors
-///
-/// Fails only if the report cannot be serialized.
-fn write_cached_drift(file: &Path, report: &DriftReport) -> Result<()> {
-    // Write-then-rename so concurrent processes never read a partial file.
-    let _ = std::fs::create_dir_all(file.parent().unwrap_or(Path::new(".")));
-    let tmp = file.with_extension(format!("tmp{}", std::process::id()));
-    if std::fs::write(&tmp, serde_json::to_vec(report)?).is_ok() {
-        let _ = std::fs::rename(&tmp, file);
-    }
-
-    Ok(())
-}
-
-/// Loads a contract's live spec and describes where it came from.
-///
-/// # Errors
-///
-/// Fails if the contract's service is unknown, the request fails or returns an
-/// error status, or the document is not a valid spec.
-async fn fetch_live_spec(
-    c: &Contract,
-    live: &LiveSpec,
-    cfg: &RunConfig,
-    http: &reqwest::Client,
-) -> Result<(Spec, String)> {
-    match live {
-        LiveSpec::Document(doc) => Ok((
-            Spec::from_value(doc, String::new())?,
-            "in-process document".to_string(),
-        )),
-        LiveSpec::Url(u) => {
-            let url = live_url(u, cfg.contract_url(c)?);
-            let resp = http
-                .get(&url)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                .with_context(|| {
-                    format!("fetching live spec of contract '{}' from {url}", c.name)
-                })?;
-            let bytes = resp.bytes().await?;
-            let ext = is_yaml_url(&url).then_some("yaml");
-            Ok((Spec::from_bytes(&bytes, ext)?, url))
-        }
-    }
-}
-
-/// `true` if `url` ends in `.yaml` or `.yml` (case-sensitive, like the server's path).
-fn is_yaml_url(url: &str) -> bool {
-    url.rsplit_once('.')
-        .is_some_and(|(_, ext)| ext == "yaml" || ext == "yml")
-}
-
-/// Absolute URL of a live spec: `u` itself if absolute, else `u` appended to `base`.
-fn live_url(u: &str, base: &str) -> String {
-    if u.starts_with("http://") || u.starts_with("https://") {
-        u.to_string()
-    } else {
-        format!("{}{}", base.trim_end_matches('/'), u)
-    }
-}
-
-/// Everything that influences a drift result: contract, pin, live source, used surface, mode.
-///
-/// Returns the first 12 bytes of a SHA-256 over those inputs as 24 hex characters.
-fn drift_cache_key(
-    c: &Contract,
-    live: &LiveSpec,
-    used: Option<&[OpUsage]>,
-    cfg: &RunConfig,
-) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut h = Sha256::new();
-    h.update(c.name.as_bytes());
-    h.update(c.pinned.sha256.as_bytes());
-    h.update(format!("{:?}", c.mode).as_bytes());
-    match live {
-        LiveSpec::Url(u) => {
-            h.update(live_url(u, cfg.contract_url(c).unwrap_or(&cfg.base_url)).as_bytes());
-        }
-        LiveSpec::Document(d) => h.update(d.to_string().as_bytes()),
-    }
-
-    h.update(serde_json::to_vec(&used).unwrap_or_default());
-    h.finalize()
-        .iter()
-        .take(12)
-        .fold(String::with_capacity(24), |mut key, b| {
-            let _ = write!(key, "{b:02x}");
-            key
-        })
+    Ok(true)
 }
 
 /// Runs fixtures of `scope` in declaration order, registering their teardowns.
@@ -570,9 +495,7 @@ async fn run_one(suite: Arc<Suite>, vu: Ctx, index: usize) -> TestReport {
         steps,
         outcome: match result {
             Ok(()) => Outcome::Passed,
-            Err(e) => Outcome::Failed {
-                message: format!("{e:#}"),
-            },
+            Err(e) => Outcome::failed(&e),
         },
         duration_ms: elapsed_ms(started),
         teardown_errors,
@@ -584,12 +507,21 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Runs a suite functionally and returns its report.
+/// Runs a suite functionally and returns its report, with secrets and
+/// redaction patterns ([`RunConfig::redactor`]) masked.
 ///
 /// Never fails: setup problems skip the selected tests and land in
 /// [`SuiteReport::setup_error`]; teardown problems in [`SuiteReport::teardown_errors`].
-/// Suite teardown runs whenever the suite scope was created.
+/// Suite teardown runs whenever the suite scope was created. A variable the
+/// configured actors use that does not resolve is a setup problem: no test runs.
 pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
+    let mut report = run_suite_unmasked(suite, cfg).await;
+    report.redact(&cfg.redactor);
+    report
+}
+
+/// [`run_suite`] before masking.
+async fn run_suite_unmasked(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
     let started = Instant::now();
     let suite = Arc::new(suite.clone());
     let selected = select_tests(&suite, cfg);
@@ -597,6 +529,7 @@ pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
         suite: suite.name.clone(),
         tests: vec![],
         setup_error: None,
+        setup_chain: vec![],
         teardown_errors: vec![],
         drift: vec![],
         duration_ms: 0.0,
@@ -605,14 +538,14 @@ pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
     let shared = match make_shared(&suite, cfg) {
         Ok(s) => s,
         Err(e) => {
-            report.setup_error = Some(format!("{e:#}"));
+            report.set_setup_error(&e);
             report.tests = skipped_reports(&suite, &selected, "runner setup failed");
             return report;
         }
     };
 
     if let Err((error, reason)) = drift_gate(&suite, cfg, &mut report.drift).await {
-        report.setup_error = Some(error);
+        report.set_setup_error(&error);
         report.tests = skipped_reports(&suite, &selected, reason);
         report.duration_ms = elapsed_ms(started);
         return report;
@@ -626,7 +559,7 @@ pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
 
     match suite_setup(&suite, &scx).await {
         Err(e) => {
-            report.setup_error = Some(e);
+            report.set_setup_error(&e);
             report.tests = skipped_reports(&suite, &selected, "suite setup failed");
         }
         Ok(()) => run_tests_in_vu(&suite, &scx, &selected, cfg, &mut report).await,
@@ -689,34 +622,25 @@ async fn drift_gate(
     suite: &Suite,
     cfg: &RunConfig,
     drift: &mut Vec<DriftReport>,
-) -> Result<(), (String, &'static str)> {
+) -> Result<(), (anyhow::Error, &'static str)> {
     *drift = check_drift(&suite.contracts, cfg)
         .await
-        .map_err(|e| (format!("contract check: {e:#}"), "contract check failed"))?;
-    if cfg.check_drift && drift.iter().any(DriftReport::is_breaking) {
-        let names: Vec<_> = drift
-            .iter()
-            .filter(|d| d.is_breaking())
-            .map(|d| d.contract.clone())
-            .collect();
-        let error = format!(
-            "live API is incompatible with pinned contract(s): {}",
-            names.join(", ")
-        );
-        return Err((error, "contract drift"));
+        .map_err(|e| (e.context("contract check"), "contract check failed"))?;
+    if cfg.check_drift
+        && let Some(error) = drift_failure(drift)
+    {
+        return Err((anyhow!(error), "contract drift"));
     }
 
     Ok(())
 }
 
 /// Runs suite fixtures, then the `before_all` hooks; returns the joined errors on failure.
-async fn suite_setup(suite: &Suite, scx: &Ctx) -> Result<(), String> {
-    setup_fixtures(suite, scx, Scope::Suite)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+async fn suite_setup(suite: &Suite, scx: &Ctx) -> Result<()> {
+    setup_fixtures(suite, scx, Scope::Suite).await?;
     let errs = run_hooks(suite, scx, HookKind::BeforeAll).await;
     if !errs.is_empty() {
-        return Err(errs.join("; "));
+        return Err(anyhow!(errs.join("; ")));
     }
 
     Ok(())
@@ -734,7 +658,7 @@ async fn run_tests_in_vu(
     let vu = scx.child_vu(0);
     match setup_fixtures(suite, &vu, Scope::Vu).await {
         Err(e) => {
-            report.setup_error = Some(format!("{e:#}"));
+            report.set_setup_error(&e);
             report.tests = skipped_reports(suite, selected, "vu setup failed");
         }
         Ok(()) => report.tests = schedule(suite, &vu, selected, cfg.max_parallel).await,
@@ -852,4 +776,85 @@ pub async fn run_suites(suites: &[Suite], cfg: &RunConfig) -> Vec<SuiteReport> {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::Url;
+
+    use super::redirect_decision;
+
+    /// Parses a test URL.
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn redirects_stay_on_the_first_origin() {
+        let first = [url("http://hub.test/a")];
+        assert_eq!(
+            redirect_decision(&first, &url("http://hub.test/b")),
+            Ok(true)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("http://hub.test:80/b")),
+            Ok(true)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("http://hub.test:81/b")),
+            Ok(false)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("http://other.test/b")),
+            Ok(false)
+        );
+        assert_eq!(
+            redirect_decision(&first, &url("https://hub.test/b")),
+            Ok(false),
+            "no upgrade"
+        );
+
+        let https = [url("https://hub.test/a")];
+        assert_eq!(
+            redirect_decision(&https, &url("http://hub.test/b")),
+            Ok(false),
+            "no downgrade"
+        );
+    }
+
+    #[test]
+    fn the_origin_is_the_first_request_not_the_last_hop() {
+        // Were the last hop the reference, a second hop could leave the origin.
+        let chain = [url("http://hub.test/a"), url("http://hub.test/b")];
+        assert_eq!(
+            redirect_decision(&chain, &url("http://hub.test/c")),
+            Ok(true)
+        );
+        assert_eq!(
+            redirect_decision(&chain, &url("http://other.test/c")),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn ten_redirects_are_followed_not_eleven() {
+        let mut chain = vec![url("http://hub.test/0")];
+        for i in 1..=10 {
+            assert_eq!(
+                redirect_decision(&chain, &url(&format!("http://hub.test/{i}"))),
+                Ok(true)
+            );
+            chain.push(url(&format!("http://hub.test/{i}")));
+        }
+
+        assert_eq!(
+            redirect_decision(&chain, &url("http://hub.test/11")),
+            Err("too many redirects")
+        );
+    }
+
+    #[test]
+    fn an_empty_history_is_an_error_not_a_silent_stop() {
+        assert!(redirect_decision(&[], &url("http://hub.test/")).is_err());
+    }
 }

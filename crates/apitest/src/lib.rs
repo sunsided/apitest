@@ -30,8 +30,10 @@ pub mod auth;
 pub mod config;
 pub mod context;
 pub mod contract;
+pub mod dotenv;
 pub mod dsl;
 pub mod http;
+pub mod redact;
 pub mod report;
 pub mod runner;
 pub mod script;
@@ -39,6 +41,8 @@ pub mod serve;
 pub mod suite;
 pub mod trace;
 
+#[cfg(feature = "diagnostics")]
+pub mod diagnostic;
 #[cfg(feature = "harness")]
 pub mod harness;
 #[cfg(feature = "macros")]
@@ -64,6 +68,7 @@ pub mod load;
 pub use context::{Ctx, Scope};
 pub use contract::{Compat, Contract};
 pub use http::{RequestOpts, Response};
+pub use redact::Redactor;
 pub use report::{Outcome, SuiteReport, TestReport};
 pub use runner::{RunConfig, run_suite, run_suites};
 pub use serve::TestServer;
@@ -83,7 +88,7 @@ pub use dsl::Actor;
 pub mod prelude {
     pub use crate::auth::{Auth, ClientCredentials, LoginFlow};
     pub use crate::context::{Ctx, Scope};
-    pub use crate::contract::{Compat, Contract};
+    pub use crate::contract::{Compat, Contract, DriftTarget};
     pub use crate::dsl::{
         Actor, actor, current_trace, defer, env, json_includes, link_containing, links, step, undo,
         unique, unique_email, visit,

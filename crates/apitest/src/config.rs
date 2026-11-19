@@ -8,8 +8,11 @@
 //! lockfile: apitest.lock.nova
 //! max_parallel: 8
 //! test_timeout: @duration("30s")
-//! vars:
+//! vars:                       # defaults; --var, the environment and .env files win
 //!   API_USER: demo
+//! env_files: [.env, .env.ci]  # default: .env and .env.local, if they exist
+//! redact:                     # regexes masked in logs, errors and reports
+//!   - "cust-[0-9]+"
 //! suites:
 //!   - suites/billing.rhai
 //!   - suites/billing.js
@@ -21,13 +24,20 @@
 //! reports:
 //!   junit: target/apitest/junit.xml
 //!   json: target/apitest/report.json
+//! drift:
+//!   against: [live, prod]
+//!   targets:
+//!     prod:
+//!       billing: specs/billing-prod.yaml
+//!     dev:
+//!       billing: https://billing.dev.example.com/openapi.json
 //! ```
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::runner::RunConfig;
@@ -74,6 +84,19 @@ pub struct Reports {
     pub json: Option<PathBuf>,
 }
 
+/// What the contract drift check compares the pins against (`drift:`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Drift {
+    /// Targets checked by default (`live`, names from `targets`, `all`).
+    /// Empty: `live` only. `--against` on the command line replaces it.
+    pub against: Vec<String>,
+    /// Named comparison specs: target → contract → file path (relative to
+    /// [`ProjectConfig::root`]) or `http(s)://` URL. Never uses the reserved
+    /// names `live` or `all` once parsed.
+    pub targets: BTreeMap<String, BTreeMap<String, String>>,
+}
+
 /// The contents of `apitest.nova`. Every field is optional; unset fields keep
 /// the [`RunConfig`] defaults when applied with [`ProjectConfig::apply`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -91,8 +114,15 @@ pub struct ProjectConfig {
     pub test_timeout: Option<NovaDuration>,
     /// Time limit for one fixture setup or teardown hook.
     pub hook_timeout: Option<NovaDuration>,
-    /// Variables available to suites; merged over the run's variables.
+    /// Defaults for variables; `--var`, the environment and `.env` files win
+    /// (see [`RunConfig::lookup`]).
     pub vars: BTreeMap<String, String>,
+    /// `.env` files to read, relative to [`ProjectConfig::root`]; later files
+    /// win. `None` reads [`DEFAULT_ENV_FILES`](crate::dotenv::DEFAULT_ENV_FILES)
+    /// if they exist; listed files must exist.
+    pub env_files: Option<Vec<PathBuf>>,
+    /// Regular expressions whose matches are masked in logs, errors and reports.
+    pub redact: Vec<String>,
     /// Script suite files to run, relative to [`ProjectConfig::root`].
     pub suites: Vec<PathBuf>,
     /// Report outputs.
@@ -105,8 +135,11 @@ pub struct ProjectConfig {
     pub tracing: Option<crate::trace::TracingConfig>,
     /// Login flow per service.
     pub auth: BTreeMap<String, crate::auth::LoginFlow>,
-    /// Named actors; `${VAR}` in credentials is resolved from vars / the environment.
+    /// Named actors; `${VAR}` in credentials and headers is resolved from
+    /// `--var`, the environment, `.env` files and `vars:`.
     pub actors: BTreeMap<String, crate::auth::ActorConfig>,
+    /// Comparison specs for the contract drift check.
+    pub drift: Drift,
     /// Directory the file was loaded from; relative paths resolve against it.
     #[serde(skip)]
     pub root: PathBuf,
@@ -134,9 +167,20 @@ impl ProjectConfig {
     /// # Errors
     ///
     /// Fails when `text` is not valid NOVA or does not match the schema; the
-    /// message lists every issue with its path.
+    /// message lists every issue with its path. Also fails when a drift target
+    /// uses a reserved name (`live`, `all`).
     pub fn parse(text: &str, what: &str) -> Result<ProjectConfig> {
-        from_nova(text, CONFIG_SCHEMA, what)
+        let cfg: ProjectConfig = from_nova(text, CONFIG_SCHEMA, what)?;
+        if let Some(name) = cfg
+            .drift
+            .targets
+            .keys()
+            .find(|n| *n == crate::contract::LIVE || *n == crate::contract::ALL)
+        {
+            bail!("{what}: drift target name '{name}' is reserved");
+        }
+
+        Ok(cfg)
     }
 
     /// Looks for `apitest.nova` in `dir` and its parents and loads the
@@ -168,11 +212,48 @@ impl ProjectConfig {
         }
     }
 
-    /// Applies this config on top of `base`. Set scalar fields replace the
-    /// base value; maps (`vars`, `services`, `auth`, `actors`) are merged, with
-    /// this config winning on equal keys.
+    /// The `.env` files this project reads, in load order (later files win):
+    /// `env_files:` resolved against [`ProjectConfig::root`] (each must exist),
+    /// else [`DEFAULT_ENV_FILES`](crate::dotenv::DEFAULT_ENV_FILES) next to the
+    /// config (read if they exist).
     #[must_use]
-    pub fn apply(&self, mut base: RunConfig) -> RunConfig {
+    pub fn env_files(&self) -> Vec<crate::dotenv::EnvFile> {
+        match &self.env_files {
+            Some(files) => files
+                .iter()
+                .map(|f| crate::dotenv::EnvFile {
+                    path: self.resolve(f),
+                    required: true,
+                })
+                .collect(),
+            None => crate::dotenv::DEFAULT_ENV_FILES
+                .iter()
+                .map(|f| crate::dotenv::EnvFile {
+                    path: self.root.join(f),
+                    required: false,
+                })
+                .collect(),
+        }
+    }
+
+    /// Applies this config on top of `base`. Set scalar fields replace the
+    /// base value; maps (`services`, `auth`, `actors`, and `vars` into
+    /// [`RunConfig::var_defaults`]) are merged, with this config winning on
+    /// equal keys. Drift targets are merged per contract, and a non-empty
+    /// `drift.against` replaces the base selection. `redact:` patterns are added
+    /// to the base's redactor. `.env` files are not read here (see
+    /// [`ProjectConfig::env_files`] and [`RunConfig::load_env_file`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails when a `redact:` pattern is not a valid regular expression.
+    pub fn apply(&self, mut base: RunConfig) -> Result<RunConfig> {
+        for (i, re) in self.redact.iter().enumerate() {
+            base.redactor
+                .pattern(re)
+                .with_context(|| format!("redact[{i}] in apitest.nova"))?;
+        }
+
         if let Some(u) = &self.base_url {
             base.base_url.clone_from(u);
         }
@@ -193,7 +274,7 @@ impl ProjectConfig {
             base.hook_timeout = t.0;
         }
 
-        base.vars.extend(self.vars.clone());
+        base.var_defaults.extend(self.vars.clone());
         base.services.extend(self.services.clone());
 
         if let Some(ua) = &self.user_agent {
@@ -206,8 +287,25 @@ impl ProjectConfig {
 
         base.auth.extend(self.auth.clone());
         base.actors.extend(self.actors.clone());
+        self.apply_drift(&mut base);
 
-        base
+        Ok(base)
+    }
+
+    /// Merges `drift:` into `base`, resolving file specs against
+    /// [`ProjectConfig::root`].
+    fn apply_drift(&self, base: &mut RunConfig) {
+        for (name, specs) in &self.drift.targets {
+            let target = base.drift_targets.entry(name.clone()).or_default();
+            for (contract, spec) in specs {
+                let source = crate::contract::SpecSource::parse(spec, &self.root);
+                target.specs.insert(contract.clone(), source);
+            }
+        }
+
+        if !self.drift.against.is_empty() {
+            base.drift_against.clone_from(&self.drift.against);
+        }
     }
 }
 
@@ -240,7 +338,7 @@ mod tests {
             "apitest.nova",
         )
         .unwrap();
-        let run = cfg.apply(RunConfig::default());
+        let run = cfg.apply(RunConfig::default()).unwrap();
         assert_eq!(run.user_agent, "my-tests/2.0");
         assert_eq!(
             run.tracing.formats,
@@ -255,7 +353,7 @@ mod tests {
         assert_eq!(run.tracing.baggage["env"], "ci");
         let off: ProjectConfig =
             from_nova("tracing:\n  enabled: false\n", CONFIG_SCHEMA, "x").unwrap();
-        assert!(!off.apply(RunConfig::default()).tracing.enabled);
+        assert!(!off.apply(RunConfig::default()).unwrap().tracing.enabled);
         let bad = from_nova::<ProjectConfig>("tracing:\n  formats: [zipkin]\n", CONFIG_SCHEMA, "x")
             .unwrap_err()
             .to_string();
@@ -296,7 +394,7 @@ actors:
       value: "${MONITOR_KEY}"
 "#;
         let cfg: ProjectConfig = from_nova(text, CONFIG_SCHEMA, "apitest.nova").unwrap();
-        let run = cfg.apply(RunConfig::default());
+        let run = cfg.apply(RunConfig::default()).unwrap();
         assert_eq!(run.auth["hub"].body["email"], "{username}");
         assert_eq!(run.auth["hub"].token, "/token");
         assert!(
@@ -317,6 +415,108 @@ actors:
         .unwrap_err()
         .to_string();
         assert!(bad.contains("actors.x.auth.type"), "{bad}");
+    }
+
+    #[test]
+    fn drift_targets_in_config() {
+        let mut cfg = ProjectConfig::parse(
+            "drift:\n  against: [prod, live]\n  targets:\n    prod:\n      billing: specs/billing-prod.yaml\n    dev:\n      billing: https://dev.example.test/openapi.json\n",
+            "apitest.nova",
+        )
+        .unwrap();
+        cfg.root = PathBuf::from("/proj");
+        let run = cfg.apply(RunConfig::default()).unwrap();
+        assert_eq!(
+            run.drift_targets["prod"].specs["billing"],
+            crate::contract::SpecSource::File("/proj/specs/billing-prod.yaml".into())
+        );
+        assert_eq!(
+            run.drift_targets["dev"].specs["billing"],
+            crate::contract::SpecSource::Url("https://dev.example.test/openapi.json".into())
+        );
+        assert_eq!(run.selected_drift_targets().unwrap(), ["prod", "live"]);
+
+        // Config targets merge into programmatic ones per contract.
+        let merged = cfg
+            .apply(RunConfig::default().drift_target(
+                "prod",
+                crate::contract::DriftTarget::new().file("hub", "/hub.yaml"),
+            ))
+            .unwrap();
+        assert_eq!(merged.drift_targets["prod"].specs.len(), 2);
+    }
+
+    #[test]
+    fn env_files_and_redaction_in_config() {
+        let mut cfg = ProjectConfig::parse(
+            "vars:\n  A: default\nenv_files: [.env, .env.ci]\nredact:\n  - \"cust-[0-9]+\"\n",
+            "apitest.nova",
+        )
+        .unwrap();
+        cfg.root = PathBuf::from("/project");
+        let files = cfg.env_files();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|f| f.required));
+        assert_eq!(files[1].path, PathBuf::from("/project/.env.ci"));
+
+        let run = cfg.apply(RunConfig::default()).unwrap();
+        // `vars:` are defaults, not overrides.
+        assert!(run.vars.is_empty());
+        assert_eq!(run.var_defaults["A"], "default");
+        assert_eq!(run.redactor.redact("id cust-42"), "id ***");
+
+        let defaults = ProjectConfig {
+            root: PathBuf::from("/project"),
+            ..Default::default()
+        }
+        .env_files();
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|f| (f.path.clone(), f.required))
+                .collect::<Vec<_>>(),
+            [
+                (PathBuf::from("/project/.env"), false),
+                (PathBuf::from("/project/.env.local"), false)
+            ]
+        );
+
+        let bad = ProjectConfig {
+            redact: vec!["(".into()],
+            ..Default::default()
+        };
+        let err = format!("{:#}", bad.apply(RunConfig::default()).unwrap_err());
+        assert!(err.contains("redact[0]"), "{err}");
+    }
+
+    #[test]
+    fn older_schema_versions_still_load() {
+        for version in ["0.1.0", "0.2.0"] {
+            let text = format!("@schema apitest-config@{version}\nvars:\n  A: x\n");
+            let cfg = ProjectConfig::parse(&text, "apitest.nova").unwrap();
+            assert_eq!(cfg.vars["A"], "x");
+        }
+    }
+
+    #[test]
+    fn drift_config_errors() {
+        let err = ProjectConfig::parse(
+            "drift:\n  targets:\n    live:\n      billing: a.yaml\n",
+            "apitest.nova",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("drift target name 'live' is reserved"),
+            "{err}"
+        );
+        let err = ProjectConfig::parse(
+            "drift:\n  targets:\n    qa:\n      billing: \"\"\n",
+            "apitest.nova",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("drift.targets"), "{err}");
     }
 
     #[test]

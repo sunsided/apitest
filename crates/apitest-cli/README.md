@@ -26,9 +26,21 @@ apitest load suites/billing.js -t "create and fetch invoice" \
   --stages "10s:20,30s:20,10s:0" --threshold "http.p95 < 50ms"
 apitest contract check suites/billing.rhai -u http://127.0.0.1:8080
 apitest contract diff specs/billing-1.0.yaml specs/billing-2.0.yaml
+apitest contract check --against qa,next                   # drift vs targets from apitest.nova, no server
+apitest call hub GET /users/me --as hub_admin              # one request, no suite or spec
+apitest run --env-file .env.ci --redact 'cust-[0-9]+'      # variables from a .env file, extra masking
 ```
 
-Exit codes: 0 passed, 1 tests or thresholds failed, 2 usage or config error.
+Variables for `${NAME}` in `apitest.nova` come from `--var`, the environment, `.env` and
+`.env.local` next to the config, then `vars:`; every one the actors use must resolve before
+a run starts. Credentials, fetched tokens and `--redact` / `redact:` matches are masked as
+`***` in all output. See
+[Variables, `.env` files and redaction](https://github.com/sunsided/apitest#variables-env-files-and-redaction).
+
+Exit codes: 0 passed, 1 tests or thresholds failed (for `apitest call`: a status other
+than 2xx or `--expect`), 2 when the run could not be carried out: a usage or config
+error, and for `apitest call` also a failed login, a connection error, too many
+redirects or `--timeout`.
 
 ## License
 

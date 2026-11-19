@@ -60,3 +60,10 @@ path = "fuzz_targets/traceparent.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dotenv"
+path = "fuzz_targets/dotenv.rs"
+test = false
+doc = false
+bench = false

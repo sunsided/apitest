@@ -13,7 +13,7 @@
 API testing and load testing in Rust, with:
 
 - **Reliable setup/teardown at every level.** Suite, virtual user, test, fixture and per-test hooks, plus `cx.defer(...)` cleanups. Cleanups run in LIFO order **even when a test fails, panics or times out**.
-- **Contract pinning.** Suites bind to a checked-in OpenAPI document via `operationId`. Requests and responses are validated against it. Before any test runs, the service's *live* spec is diffed against the pin, limited to the operations and fields the suites actually use (recorded in `apitest.lock.nova`). Incompatible changes fail loudly.
+- **Contract pinning.** Suites bind to a checked-in OpenAPI document via `operationId`. Requests and responses are validated against it. Before any test runs, the service's *live* spec is diffed against the pin, limited to the operations and fields the suites actually use (recorded in `apitest.lock.nova`). Instead of, or besides, the live spec you can pick named comparison specs (files or URLs, e.g. what dev, QA and prod run, or your local branch), so the check doesn't need a running service. Incompatible changes fail loudly, reported per target.
 - **One core, four frontends.** Suites can be written in **Rust, Rhai, JavaScript (QuickJS) or Python**. Every frontend gets the same `cx` API and the same semantics. Fixture values are JSON, so a Rust fixture can feed a JS test.
 - **Functional and load runs from the same tests.** Any test can be a load scenario: constant VUs, a shared iteration budget, or ramping stages. You get HDR latency histograms and k6-style thresholds (`http.p95 < 300ms`).
 - **Library or standalone.** Use it from `cargo test` (libtest-mimic harness, with `#[apitest::test]` attribute macros if you like), with nextest (process-per-test aware), from your own code, from pytest, via the `apitest` CLI, or via `npx @apitest/cli`.
@@ -28,6 +28,7 @@ API testing and load testing in Rust, with:
 - [Lifecycle](#lifecycle)
 - [Writing tests](#writing-tests)
 - [Authentication](#authentication)
+  - [Variables, `.env` files and redaction](#variables-env-files-and-redaction)
 - [Tracing and headers](#tracing-and-headers)
 - [The same suite in four languages](#the-same-suite-in-four-languages)
   - [Rust suite](#rust-suite)
@@ -40,6 +41,8 @@ API testing and load testing in Rust, with:
   - [Native-feeling Rust tests: attribute macros](#native-feeling-rust-tests-attribute-macros)
   - [nextest](#nextest)
 - [CLI](#cli)
+  - [Terminal diagnostics](#terminal-diagnostics)
+  - [One-off requests: `apitest call`](#one-off-requests-apitest-call)
 - [Load testing](#load-testing)
 - [Python bindings](#python-bindings)
 - [Tests](#tests)
@@ -55,7 +58,7 @@ Four crates: the library, its proc macros, the CLI and the Python bindings. Libr
 
 ```
 crates/apitest      the library
-  features: load, axum (default) · rhai, js, harness, macros (opt-in) · full (all of them)
+  features: load, axum (default) · rhai, js, harness, macros, diagnostics (opt-in) · full (all of them)
             --no-default-features = core only (runner, contracts, HTTP, reports, NOVA config)
   src/context.rs    scope chain (run → suite → vu → test), values, default headers, defer/unwind, guarded execution
   src/suite.rs      Suite / Fixture / TestCase / TestOpts (concurrency, resources, timeout, setup, teardown)
@@ -68,9 +71,10 @@ crates/apitest      the library
   src/harness.rs    cargo test / nextest integration
   src/registry.rs   collects #[apitest::test|fixture|suite] registrations (linkme)
   src/report.rs     console, JUnit XML
+  src/diagnostic.rs miette rendering for the terminal (feature diagnostics)
   src/config.rs     apitest.nova
 crates/apitest-macros  #[apitest::test], #[apitest::fixture], #[apitest::suite]
-crates/apitest-cli  the `apitest` binary (clap); depends on apitest with rhai, js, load
+crates/apitest-cli  the `apitest` binary (clap); depends on apitest with rhai, js, load, diagnostics
 crates/apitest-py   pyo3 extension (`apitest._native`) + the `apitest` Python package (maturin)
 npm/                @apitest/cli: launcher + per-platform binary packages + TypeScript types for JS suites
 demo/               billing service specs (v1.0 pinned, v1.1 compatible, v2.0 breaking), suites in Rhai/JS, apitest.nova
@@ -328,6 +332,62 @@ actors:
       client_secret: "${REPORTING_SECRET}"
 ```
 
+### Variables, `.env` files and redaction
+
+`${NAME}` works in every auth field and actor header, and `env("NAME")` / `cx.env("NAME")` read the same variables. A name is looked up in this order, highest first:
+
+1. `--var NAME=…` (`RunConfig::var`)
+2. the process environment
+3. `.env` files, a later file winning over an earlier one (`.env.local` over `.env`)
+4. `vars:` in `apitest.nova` (`RunConfig::var_default`), as defaults
+
+- **`.env` files** are parsed with [`dotenvy`](https://docs.rs/dotenvy) into the run's own variables; the process environment is never changed. Without `env_files:`, `.env` and `.env.local` next to `apitest.nova` are read if they exist. Files listed in `env_files:` (relative to `apitest.nova`) or passed with `--env-file` (repeatable, relative to the current directory, replacing the project's list) must exist. `--no-env-file` reads none. Errors name the file and a position, never its content. Keep `.env.local` out of git (this repository's [`.gitignore`](https://github.com/sunsided/apitest/blob/main/.gitignore) lists it); a dedicated test OAuth client's `client_id` and `client_secret` belong there or in CI secrets.
+- **Checked up front.** Every `${NAME}` in the configured actors must resolve before any test starts. All missing names are reported at once, with the fields that use them, and `apitest run` / `load` exit with code 2. There is no fallback value. A set-but-empty variable counts as set (an empty `FOO` in the environment hides `FOO` in `.env`), but an empty variable anywhere in an actor (auth fields and headers, also inside `"Bearer ${TOKEN}"`) is an error; write a literal `""` for an intentionally empty value. A non-UTF-8 environment value is an error, not a fall-through.
+- **Secrets are masked.** Passwords, client secrets, bearer tokens, API keys and header values of actors and `Auth`s, and every token a login or client-credentials grant returns, are replaced with `***` in `cx.log`, Rhai `print` / `debug` and JS `console.log`, errors and reports (console, JUnit, JSON). Python's own `print` writes straight to stdout and is not masked; use `cx.log` there. Values shorter than 4 characters are not masked, so that a one-letter test password does not garble every line.
+- **Redaction patterns** mask anything else that must never be printed: `redact:` in `apitest.nova` (see the [schema](https://github.com/sunsided/apitest/blob/main/crates/apitest/schemas/apitest-config.novs)) and `--redact` (repeatable) take regular expressions, and every match becomes `***`. An invalid pattern is a configuration error.
+- Actors stay templates: serialized or written anywhere, they keep `${SECRET}`, never the value, and nothing from `.env` reaches the lockfile.
+
+```text
+# apitest.nova
+vars:
+  REPORTING_CLIENT_ID: reporting-test   # default; .env, the environment or --var win
+env_files: [.env, .env.local]           # optional; the default list, but listed files must exist
+redact:
+  - "cust-[0-9]+"
+actors:
+  reporting:
+    service: reports
+    auth:
+      type: client_credentials
+      token_url: https://idp.example.test/oauth/token
+      client_id: "${REPORTING_CLIENT_ID}"
+      client_secret: "${REPORTING_CLIENT_SECRET}"
+```
+
+```bash
+# .env.local (not committed)
+REPORTING_CLIENT_SECRET=…
+```
+
+The same from Rust:
+
+```rust
+let cfg = RunConfig::new(base_url)
+    .var_default("REPORTING_CLIENT_ID", "reporting-test")
+    .env_file(".env")?
+    .env_file(".env.local")?
+    .redact_pattern("cust-[0-9]+")?
+    .actor(
+        "reporting",
+        "reports",
+        Auth::ClientCredentials(ClientCredentials::new(
+            token_url,
+            "${REPORTING_CLIENT_ID}",
+            "${REPORTING_CLIENT_SECRET}",
+        )),
+    );
+```
+
 ## Tracing and headers
 
 Every request carries trace context unless you opt out. W3C Trace Context is the default; other formats can be added or used instead:
@@ -525,6 +585,34 @@ suite billing-rust
 - **Runtime validation** still catches drift when the live spec lies or isn't published: `contract violation: response 200 of getInvoice does not match pinned 'billing' v1.0.0: /id: "2" is not of type "integer"`. Under load it is sampled (`validate_every`).
 - **utoipa:** pass the generated document directly, with no HTTP fetch: `Contract::pinned("api", "contracts/api-3.2.yaml")?.live_document(serde_json::to_value(ApiDoc::openapi())?)`.
 - **CI without a running service:** `apitest contract diff pinned.yaml candidate.yaml` exits 1 on breaking changes.
+- **Comparison specs (drift targets).** The live spec is one target, `live`. Name others in `apitest.nova`, one spec per contract, as a file path (relative to the config) or an `http(s)://` URL:
+
+  ```text
+  drift:
+    against: [live, prod]          # default selection; omitted = [live]
+    targets:
+      dev:
+        billing: https://billing.dev.example.com/openapi.json
+      qa:
+        billing: https://billing.qa.example.com/openapi.json
+      prod:
+        billing: specs/billing-prod.yaml
+      branch:
+        billing: ../billing-service/openapi.yaml
+  ```
+
+  `--against dev,prod` (or `RunConfig::drift_against`) picks targets for one run and replaces `drift.against`. `all` means `live` plus every named target. A selection without `live` fetches nothing from the service, so `apitest contract check --against prod` works offline. `--against-spec billing=path/or/url` checks a one-off spec (target `cli`) without touching the config.
+
+  Each contract is diffed against each selected target with the same lockfile-limited diff. Each pair gets its own report line, JSON entry and `[contract] billing @ prod` case in JUnit and the harness (`live` keeps the plain `[contract] billing` name). A breaking result from any selected target fails the suite. Targets without a spec for a contract skip it. A selected target naming a contract that no project suite has is an error in the CLI, since it is almost always a typo. In Rust:
+
+  ```rust
+  let cfg = RunConfig::new(url)
+      .drift_target(
+          "prod",
+          DriftTarget::new().file("billing", "specs/billing-prod.yaml"),
+      )
+      .drift_against(["live", "prod"]);
+  ```
 
 ## Using it as a library (axum example)
 
@@ -642,6 +730,10 @@ cargo run -p apitest-cli -- contract check demo/suites/billing.rhai -u http://12
 cargo run -p apitest-cli -- contract diff demo/specs/billing-1.0.yaml demo/specs/billing-2.0.yaml
 ```
 
+```bash
+cd demo && cargo run -p apitest-cli -- contract check --against qa,next   # drift targets from apitest.nova, no server needed
+```
+
 `demo/apitest.nova`:
 
 ```text
@@ -656,9 +748,63 @@ suites:
   - suites/billing.js
 reports:
   junit: ../target/apitest/junit.xml
+drift:
+  targets:
+    qa:
+      billing: specs/billing-1.1.yaml
+    next:
+      billing: specs/billing-2.0.yaml
 ```
 
 Exit codes: 0 passed, 1 tests or thresholds failed, 2 usage or config error.
+
+### Terminal diagnostics
+
+With the `diagnostics` feature (part of `full`, and always on in the CLI), `SuiteReport::render_terminal(color)` renders failures as [miette](https://docs.rs/miette) diagnostics with their whole cause chain:
+
+```text
+  ✗ sign in [3 ms]
+      ✗ as mallory [3 ms]
+        × step 'as mallory' failed
+        ├─▶ login as 'mallory' on 'svc' failed
+        ╰─▶ status 401: {"error":"bad credentials"}
+```
+
+The CLI uses it for suite output and for its own errors. Colour is only used on a terminal, and `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE` and `TERM=dumb` are respected (`apitest::diagnostic::use_color`). `render`, JUnit, JSON, `assert_passed` and the libtest harness messages stay plain text, because CI and IDE tooling parses them. The cause chain is kept on `Outcome::Failed` and `SuiteReport::setup_chain`, but it is not serialized.
+
+### One-off requests: `apitest call`
+
+`apitest call <service> <method> <path>` sends a single request without a suite or an OpenAPI spec. It reads the same `apitest.nova`, so services, named actors, vars, the User-Agent and tracing all apply.
+
+```bash
+apitest call hub GET /users/me --as hub_admin \
+  --var HUB_ADMIN_EMAIL=admin@hub.test --var HUB_ADMIN_PASSWORD=...
+apitest call hub POST /users --as hub_admin --json '{"email":"a@b.test"}'    # or --json @user.json / @- for stdin
+apitest call hub PUT /notes/7 --data @note.md -H 'Content-Type: text/markdown'
+apitest call mail GET /messages --query to=a@b.test -i                      # -i: status code and headers first
+apitest call hub DELETE /users/7 --as hub_admin --expect 204 -v             # -v: request/response summary on stderr
+```
+
+- **Bodies** are UTF-8 text of at most 16 MiB: `--json`, `--data` (inline, `@file`, `@-` for stdin; `@@` starts a literal `@`) or `--form k=v`.
+- **Variables and redaction** work as in `run` (see [Variables, `.env` files and redaction](#variables-env-files-and-redaction)): `.env` / `.env.local` next to `apitest.nova` (or `--env-file`, `--no-env-file`), `--var`, and `redact:` / `--redact`. Only the actor in `--as` must have all its variables; another actor's missing secret doesn't block a one-off call.
+- **Output.** The response body goes to stdout as received, byte for byte, so it pipes into `jq` and binary downloads work. Known secrets and redaction patterns are masked as `***` there too (in the body and, with `-i`, the headers), so a token endpoint's answer doesn't end up in a terminal or CI log; that is the one case a body is changed. `-i` puts `HTTP <status>` and the response headers before it (a repeated header shows its last value). `-v` writes the request as sent (including the query) and the response to stderr. Besides known secrets and patterns, it redacts any header or query parameter whose name contains `auth`, `cookie`, `token`, `key`, `secret`, `session`, `password` or `credential` (a `-H` value of such a header is masked everywhere else too, and so is a `--query` value whose name is a credential's: `token`, `key`, `apikey`, `password`, `secret`, `sig`, `signature` or one ending in `_token`, `_key`, `_secret` or `_password`), plus the header a login flow or API key uses and the actor's configured `headers:`, and drops `user:password@` from the URL. Errors go to stderr as [terminal diagnostics](#terminal-diagnostics). `--timeout` (default 30s, including a login) stops a hanging call; it starts once the body is read, so it does not cover waiting for `@-` on stdin.
+- **Exit codes.** 0 for a 2xx status (or the `--expect` status), 1 for any other status, 2 for usage, config, login, connection or redirect-limit errors and for `--timeout`.
+- **Nothing is guessed, especially not auth.** The service must be listed under `services:` (`base_url` is not a fallback), and the path, like a login flow's `path`, must start with `/`, so credentials can't be sent to another host. Without `--as`, no credentials are taken from the config: the request carries only what you pass with `-H`. An actor that logs in needs a service to log in on (its `service:` or `auth.service`) and a login flow with a `path` under `auth:`, because there is no spec to find a `login` operation in. If it's missing, the call fails before sending anything:
+
+  ```text
+    × actor 'hub_admin' logs in as '${HUB_ADMIN_EMAIL}' on 'hub', but there is no login flow for 'hub'
+    │ help: `apitest call` has no OpenAPI spec and doesn't guess a login endpoint; configure it in /srv/billing/apitest.nova, e.g.
+    │   auth:
+    │     hub:
+    │       path: /login
+    │       body:
+    │         username: "{username}"
+    │         password: "{password}"
+    │       token: /token
+  ```
+
+- **Actors stay intact.** An actor must belong to the service it's sent to, and a `-H` for a header the actor sets (its credentials, `headers:` or `user_agent:`) is refused: the two would conflict, and one of them would be dropped without a word (an `Authorization` replaces the actor's credentials, while an API key or login-flow header overwrites yours).
+- **Redirects stay on the service.** Redirects are followed only within the service's origin (scheme, host and port), at most 10 times (more is an error, exit 2). A redirect to another origin is not followed, so an API key, an actor's `headers:` or a `-H` value never reach another host: the 3xx is the result, which exits 1 unless `--expect` names that status, and stderr then names the `Location` it pointed to. An `http://` to `https://` upgrade of the same host counts as another origin too (the HTTP client would drop `Authorization` but keep an API key), so configure the service's `https://` URL.
 
 ## Load testing
 
@@ -693,7 +839,8 @@ cd crates/apitest-py && maturin develop && pytest -v
 |---|---|
 | `cargo test -p apitest --features full --test scenarios` | drift (compatible/breaking/in-process doc), runtime validation, cleanup after failure/panic/timeout, serial vs parallel vs resources, lockfile, JUnit, Rhai/JS suites, Rust and JS load (ramping) |
 | `cargo test -p apitest --features full --test billing_harness` | the libtest harness with Rust, Rhai and JS suites against an in-process axum app |
-| `cargo test -p apitest --features full --test headers` | trace formats and correlation, opt-out at every level, parent traces, User-Agent precedence, all auth kinds, single-flight cached logins with 401 re-login, client-credentials expiry, named actors from Rust, JS and Rhai |
+| `cargo test -p apitest --features full --test headers` | trace formats and correlation, opt-out at every level, parent traces, User-Agent precedence, all auth kinds, single-flight cached logins with 401 re-login, client-credentials expiry, named actors from Rust, JS and Rhai, `.env` files, up-front variable checks and masked secrets |
+| `cargo test -p apitest --features full --test it diagnostics` | miette cause chains in `render_terminal`, plain text in `render`, JUnit, JSON and `assert_passed` |
 | `cargo test -p apitest --features full --test care_flow` | the multi-actor, multi-service onboarding flow (Hub, App, mail mock) with step reports, rollback and a `finally` leftover check |
 | `cargo test -p apitest --features full --test macro_harness` | the same suite via `#[apitest::test]` / `#[apitest::fixture]` / `#[apitest::suite]` (`DEMO_VARIANT=2.0` shows drift) |
 | `cargo nextest run -p apitest --features full` | all harness targets process-per-test; `nextest_locks` checks the cross-process serial/resource rules |
@@ -708,7 +855,7 @@ Each scenario checks `GET /_stats` afterwards to prove that no tokens or invoice
 
 ## Open questions / next steps
 
-- **miette diagnostics (decided: terminal only).** The CLI and the console reporter render failures with miette. JUnit, JSON and the libtest harness messages stay plain text, because CI and IDE tooling parses them. In order of effort:
+- **Source spans in diagnostics.** Failures render with miette on the terminal (see [Terminal diagnostics](#terminal-diagnostics)), but without source spans yet. In order of effort:
   - Rhai errors already carry line and column, so failures can point at the `cx.op(..)` call in the `.rhai` file.
   - NOVA config errors get spans through `novafile-text`'s `miette` feature.
   - JS needs scripts evaluated with their file names.
@@ -721,6 +868,7 @@ Each scenario checks `GET /_stats` afterwards to prove that no tokens or invoice
 - **Scripts are synchronous.** That's simple and k6-like, but a JS `async` API on rquickjs's async runtime would allow fan-out inside one test.
 - **Rhai `before_request` hooks** aren't possible yet: a hook would re-enter the worker that's blocked on the request. Default headers cover auth for now. A Rust-side `RequestHook` trait would be easy to add.
 - **Drift diff coverage.** It handles types, properties, required, enums, items, params, statuses and bodies. Not yet: `oneOf`/`anyOf`/`allOf`, discriminators, headers, content types other than JSON, security schemes, and recursive `$ref`s beyond depth 32.
+- **Report-only drift targets.** Every selected target gates the suite today. A per-target `fail: false` would let `dev` report drift without blocking the run.
 - **Per-test contract usage.** The lockfile records usage per contract; recording it per test would make "which tests depend on X" queries possible.
 - **Reports.** JUnit and JSON exist; CTRF, TAP or a live event stream (JSON lines) for dashboards would be next.
 - **Ctrl-C.** Cleanups currently run on normal completion, failures, panics and timeouts, but not on SIGINT. That needs a cancellation token threaded through the runner.
