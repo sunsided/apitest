@@ -263,6 +263,23 @@ pub(crate) fn make_shared(suite: &Suite, cfg: &RunConfig) -> Result<Arc<Shared>>
     }))
 }
 
+impl Ctx {
+    /// A run-scope context outside any suite: no contracts, no fixtures, nothing
+    /// deferred.
+    ///
+    /// For one-off requests such as the CLI's `apitest call`. Requests sent
+    /// through it still get the run's User-Agent, tracing, services, vars and
+    /// named actors from `cfg`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the HTTP client cannot be built or the configured trace parent is
+    /// malformed.
+    pub fn standalone(cfg: &RunConfig) -> Result<Ctx> {
+        Ok(Ctx::root(make_shared(&Suite::new("standalone"), cfg)?))
+    }
+}
+
 /// Fetches live specs and diffs them against the pinned ones.
 ///
 /// Contracts without a live spec are skipped. With a lockfile whose pin matches,
