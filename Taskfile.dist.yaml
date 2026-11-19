@@ -232,6 +232,53 @@ tasks:
       # --bench '*': only [[bench]] targets (--benches would include lib harnesses that reject criterion flags).
       - cargo bench --workspace --bench '*' -- {{.CLI_ARGS}}
 
+  # GitVersion owns the version (CONTRIBUTING.md, Releasing).
+  version:
+    desc: Print the version GitVersion computes for the current commit
+    env:
+      DO_NOT_TRACK: '1'
+    preconditions:
+      - &gitversion
+        sh: command -v dotnet-gitversion
+        msg: "GitVersion not found - dotnet tool install -g GitVersion.Tool"
+    cmds:
+      - dotnet-gitversion --show-variable SemVer
+
+  release:tag:
+    desc: "Tag a stable release vX.Y.Z from GitVersion (PRE=1: tag the pre-release, e.g. vX.Y.Z-beta.N)"
+    env:
+      DO_NOT_TRACK: '1'
+    preconditions:
+      - *gitversion
+      - sh: git diff --quiet && git diff --cached --quiet
+        msg: "Working tree is not clean"
+      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" = main ] || git rev-parse --abbrev-ref HEAD | grep -qE "^(release|hotfix)/"'
+        msg: "Tag from main or a release/hotfix branch"
+    vars:
+      VERSION:
+        sh: DO_NOT_TRACK=1 dotnet-gitversion --show-variable {{if .PRE}}SemVer{{else}}MajorMinorPatch{{end}}
+    prompt: "Create and push tag v{{.VERSION}}? This publishes to crates.io and npm and creates the GitHub Release."
+    cmds:
+      - git tag -a "v{{.VERSION}}" -m "Release {{.VERSION}}"
+      - git push origin "v{{.VERSION}}"
+
+  dist:
+    desc: Build the release binary with cargo auditable (dependency tree embedded)
+    preconditions:
+      - sh: cargo auditable --version
+        msg: "cargo-auditable not found - cargo install --locked cargo-auditable"
+    cmds:
+      - cargo auditable build --release --locked -p apitest-cli {{.CLI_ARGS}}
+
+  dist:sbom:
+    desc: Write a CycloneDX SBOM extracted from the built binary
+    preconditions:
+      - sh: command -v auditable2cdx
+        msg: "auditable2cdx not found - cargo install --locked auditable2cdx"
+    deps: [dist]
+    cmds:
+      - auditable2cdx target/release/apitest > target/release/apitest.cdx.json
+
   ci:
     desc: Run the CI checks locally (mirrors .github/workflows/ci.yml)
     cmds:

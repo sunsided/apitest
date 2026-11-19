@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "apitest"
-version = "0.0.1"
+dynamic = ["version"]
 description = "API tests, load tests and OpenAPI contract pinning (Python bindings to the Rust core)"
 requires-python = ">=3.10"
 license = { text = "EUPL-1.2 OR MIT OR Apache-2.0" }

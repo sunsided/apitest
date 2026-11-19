@@ -9,6 +9,7 @@ Biome, SWC and oxlint use. It is not WebAssembly.
     @apitest/cli-linux-x64-gnu     each holds only bin/apitest[.exe] and declares
     @apitest/cli-linux-x64-musl    "os" / "cpu" / "libc", so npm installs just the
     @apitest/cli-linux-arm64-gnu   one matching the machine
+    @apitest/cli-linux-arm64-musl
     @apitest/cli-darwin-arm64
     @apitest/cli-darwin-x64
     @apitest/cli-win32-x64-msvc

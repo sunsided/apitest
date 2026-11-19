@@ -1,0 +1,184 @@
+# Release binaries: on a vX.Y.Z (or vX.Y.Z-beta.N) tag, build auditable `apitest` binaries per target
+# (always including static linux-musl builds), extract a CycloneDX SBOM from each binary, attest
+# binary, SBOM and archive (public repos), create the GitHub Release with the archives attached, and
+# publish the npm launcher plus one npm package per platform.
+name: Binaries
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: apitest
+  CRATE: apitest-cli
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, archive: tar.gz }
+          # Always ship static musl builds: they run on any Linux, regardless of glibc version.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, archive: tar.gz, cross: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, archive: tar.gz }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, archive: tar.gz, cross: true }
+          - { target: aarch64-apple-darwin, os: macos-latest, archive: tar.gz }
+          - { target: x86_64-apple-darwin, os: macos-latest, archive: tar.gz }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, archive: zip, exe: .exe }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-auditable,cargo-edit
+      - name: Stamp the tag's version into the workspace
+        run: |
+          sh scripts/zero-version.sh
+          cargo set-version "${GITHUB_REF_NAME#v}"
+      - name: Build (cargo auditable embeds the dependency tree)
+        # --locked is safe: cargo set-version updated Cargo.lock along with the manifests.
+        run: cargo auditable build --release --locked -p "$CRATE" --bin "$BIN" --target "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+      - name: Extract the SBOM from the binary
+        run: |
+          cargo install --locked auditable2cdx@0.1.0
+          mkdir -p dist
+          cp "target/$TARGET/release/$BIN$EXE" dist/
+          auditable2cdx "dist/$BIN$EXE" > "dist/$BIN.cdx.json"
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ matrix.exe }}
+      - name: Attest the binary (build provenance)
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/${{ env.BIN }}${{ matrix.exe }}
+      - name: Attest the binary's SBOM
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/${{ env.BIN }}${{ matrix.exe }}
+          sbom-path: dist/${{ env.BIN }}.cdx.json
+      - name: Package
+        id: package
+        run: |
+          name="$BIN-$GITHUB_REF_NAME-$TARGET"
+          cp README.md dist/
+          cp -rL LICENSES dist/
+          if [ "$ARCHIVE" = zip ]; then
+            (cd dist && 7z a -tzip "../$name.zip" .)
+          else
+            tar -czf "$name.tar.gz" -C dist .
+          fi
+          echo "file=$name.$ARCHIVE" >> "$GITHUB_OUTPUT"
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
+      - name: Attest the archive
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.package.outputs.file }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.package.outputs.file }}
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      # The tag already exists (pushed by `task release:tag`), so creating the Release with the
+      # workflow token is fine: only tags created by that token fail to trigger workflows.
+      - name: Create the Release with the archives attached
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          # shellcheck disable=SC2086 # PRERELEASE is an optional flag
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes --title "$GITHUB_REF_NAME" $prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  npm:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC) and provenance
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v8
+        with:
+          path: archives
+          merge-multiple: true
+      - name: Set the version from the tag
+        run: node npm/scripts/set-version.mjs "$GITHUB_REF_NAME"
+      - name: Build one package per platform
+        run: |
+          for archive in archives/*; do
+            target="${archive#archives/apitest-"$GITHUB_REF_NAME"-}"
+            target="${target%.tar.gz}"
+            target="${target%.zip}"
+            mkdir -p "unpacked/$target"
+            case "$archive" in
+              *.zip) unzip -q "$archive" -d "unpacked/$target" ;;
+              *) tar -xzf "$archive" -C "unpacked/$target" ;;
+            esac
+            bin="unpacked/$target/apitest"
+            if [ -f "$bin.exe" ]; then bin="$bin.exe"; fi
+            node npm/scripts/build-platform-package.mjs --target "$target" --binary "$bin" --out npm/dist
+          done
+      # Platform packages first: the launcher's optionalDependencies must resolve.
+      - name: Publish the platform packages
+        run: |
+          tag=latest
+          case "$GITHUB_REF_NAME" in *-*) tag=next ;; esac
+          for pkg in npm/dist/*/; do npm publish "$pkg" --access public --provenance --tag "$tag"; done
+      - name: Publish @apitest/cli
+        run: |
+          tag=latest
+          case "$GITHUB_REF_NAME" in *-*) tag=next ;; esac
+          npm publish npm/cli --access public --provenance --tag "$tag"
