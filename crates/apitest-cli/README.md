@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/crates/l/apitest-cli)](https://github.com/sunsided/apitest#license)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
 
-The `apitest` command: runs [`apitest`](https://crates.io/crates/apitest) suites written in Rhai or JavaScript,
+The `apitest` command: runs [`apitest`](https://crates.io/crates/apitest) suites written in Rhai, JavaScript or Gherkin,
 as functional tests or load tests, and checks OpenAPI contracts for drift.
 
 ## Install

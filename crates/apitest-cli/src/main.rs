@@ -205,7 +205,7 @@ enum ContractCmd {
     /// Diff the suites' contracts against their pins (no tests run): the live
     /// specs, or the drift targets chosen with --against.
     Check {
-        /// Suite files (.rhai, .js). Default: `suites` from the config.
+        /// Suite files (.rhai, .js, .feature). Default: `suites` from the config.
         files: Vec<PathBuf>,
         /// Shared options (boxed: they dwarf `Diff`).
         #[command(flatten)]
