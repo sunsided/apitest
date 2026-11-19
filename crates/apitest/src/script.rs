@@ -22,12 +22,20 @@ pub mod rhai;
 /// Blocking facade over [`Ctx`] for script engines.
 #[derive(Clone)]
 pub struct SyncCtx {
+    /// The async context this facade forwards to; scripts share its scope and values.
     pub cx: Ctx,
+    /// Handle of the runtime that owns `cx`, captured at construction so blocking
+    /// calls from worker threads can drive futures on it.
     rt: Handle,
 }
 
 impl SyncCtx {
-    /// Must be called from inside the tokio runtime (it captures the current handle).
+    /// Wraps `cx` for use from a blocking thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a tokio runtime, because it captures the
+    /// current runtime handle.
     #[must_use]
     pub fn new(cx: Ctx) -> Self {
         SyncCtx {
@@ -36,36 +44,57 @@ impl SyncCtx {
         }
     }
 
+    /// Drives `f` to completion on the captured runtime, blocking this thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called from an async task of the runtime itself; use it only
+    /// from `spawn_blocking` or a dedicated worker thread.
     pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
         self.rt.block_on(f)
     }
 
+    /// Looks `key` up through the scope chain; a missing key reads as JSON `null`.
     #[must_use]
     pub fn get(&self, key: &str) -> Value {
         self.cx.get(key).unwrap_or(Value::Null)
     }
 
+    /// Stores `value` under `key` in the current scope.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the value cannot be represented as JSON.
     pub fn set(&self, key: &str, value: Value) -> Result<()> {
         self.cx.set(key, value)
     }
 
+    /// Reads a `--var` override or, failing that, a process environment variable.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the variable is set in neither place.
     pub fn env(&self, key: &str) -> Result<String> {
         self.cx.env(key)
     }
 
+    /// Like [`SyncCtx::env`], but yields `None` for an unset variable.
     #[must_use]
     pub fn env_opt(&self, key: &str) -> Option<String> {
         self.cx.env_opt(key)
     }
 
+    /// Adds a default header to every request from the current scope and its children.
     pub fn header(&self, name: &str, value: &str) {
         self.cx.default_header(name, value);
     }
 
+    /// Appends `msg` to the current test's log.
     pub fn log(&self, msg: &str) {
         self.cx.log(msg);
     }
 
+    /// Virtual-user index under load; `Some(0)` in functional runs.
     #[must_use]
     pub fn vu(&self) -> Option<usize> {
         self.cx.vu()
@@ -82,11 +111,16 @@ impl SyncCtx {
         self.cx.bearer(token);
     }
 
+    /// HTTP Basic credentials for the rest of the current scope.
     pub fn basic(&self, username: &str, password: &str) {
         self.cx.basic(username, password);
     }
 
     /// Scope auth from a value (`{ type: "login", service, username, password }`, ...).
+    ///
+    /// # Errors
+    ///
+    /// Fails when `auth` does not deserialize into an [`crate::auth::Auth`].
     pub fn auth(&self, auth: Value) -> Result<()> {
         self.cx
             .auth(serde_json::from_value(auth).map_err(|e| anyhow::anyhow!("invalid auth: {e}"))?);
@@ -94,24 +128,39 @@ impl SyncCtx {
     }
 
     /// Raw request; returns the response as a value (`status`, `headers`, `body`, `text`, ...).
+    ///
+    /// A `null` `opts` means "no options".
+    ///
+    /// # Errors
+    ///
+    /// Fails on invalid options, transport errors and failed response checks.
     pub fn http(&self, method: &str, path: &str, opts: Value) -> Result<Value> {
         let opts = if opts.is_null() {
-            Value::Object(Default::default())
+            Value::Object(serde_json::Map::default())
         } else {
             opts
         };
+
         Ok(self
             .block_on(self.cx.request_value(method, path, opts))?
             .to_value())
     }
 
     /// Contract call by operationId; returns the response as a value.
+    ///
+    /// A `null` `opts` means "no options".
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unknown contract or operation, invalid options, transport
+    /// errors and responses that break the contract.
     pub fn call(&self, contract: &str, op: &str, opts: Value) -> Result<Value> {
         let opts = if opts.is_null() {
-            Value::Object(Default::default())
+            Value::Object(serde_json::Map::default())
         } else {
             opts
         };
+
         Ok(self
             .block_on(self.cx.call_value(contract, op, opts))?
             .to_value())
@@ -148,7 +197,18 @@ impl Default for LoadOptions {
 }
 
 /// Loads suites from a script file, picking the frontend by extension.
-#[expect(unused_variables)]
+///
+/// `.rhai` goes to the Rhai frontend and `.js`/`.mjs` to the JS frontend, each
+/// only when its feature is enabled.
+///
+/// # Errors
+///
+/// Fails when the file has no extension, no enabled frontend handles it, or the
+/// frontend fails to read or evaluate the script.
+#[cfg_attr(
+    not(feature = "js"),
+    expect(unused_variables, reason = "`opts` only configures the JS frontend")
+)]
 pub fn load_suites(path: &Path, opts: &LoadOptions) -> Result<Vec<Suite>> {
     match path.extension().and_then(|e| e.to_str()) {
         #[cfg(feature = "rhai")]
@@ -163,6 +223,7 @@ pub fn load_suites(path: &Path, opts: &LoadOptions) -> Result<Vec<Suite>> {
     }
 }
 
+/// Human-readable list of the script extensions compiled into this build.
 fn enabled_frontends() -> &'static str {
     match (cfg!(feature = "rhai"), cfg!(feature = "js")) {
         (true, true) => ".rhai, .js",
@@ -172,7 +233,9 @@ fn enabled_frontends() -> &'static str {
     }
 }
 
-/// Helpers shared by frontends for reading suite definitions.
+/// Resolves a path named in a script against the script's directory `base`.
+///
+/// Absolute paths are returned unchanged.
 #[cfg(any(feature = "rhai", feature = "js"))]
 pub(crate) fn resolve_relative(base: &Path, p: &str) -> std::path::PathBuf {
     let path = Path::new(p);
@@ -184,12 +247,20 @@ pub(crate) fn resolve_relative(base: &Path, p: &str) -> std::path::PathBuf {
 }
 
 /// Applies language-neutral test options `{ parallel, serial, resources, timeout_ms, tags }`.
+///
+/// A non-object `v` is ignored. `timeoutMs` and `resource` are accepted as aliases.
+///
+/// # Errors
+///
+/// Fails on an unknown key, a `resources` value that is neither a string nor a
+/// list, or a `timeout_ms` that is not a non-negative integer.
 #[cfg(any(feature = "rhai", feature = "js"))]
 pub(crate) fn apply_test_opts(opts: &mut crate::suite::TestOpts, v: &Value) -> Result<()> {
     use crate::suite::Concurrency;
     let Some(o) = v.as_object() else {
         return Ok(());
     };
+
     for (k, val) in o {
         match k.as_str() {
             "parallel" => {
@@ -226,5 +297,6 @@ pub(crate) fn apply_test_opts(opts: &mut crate::suite::TestOpts, v: &Value) -> R
             ),
         }
     }
+
     Ok(())
 }
