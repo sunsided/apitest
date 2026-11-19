@@ -30,13 +30,18 @@ API testing and load testing in Rust, with:
 - [Authentication](#authentication)
 - [Tracing and headers](#tracing-and-headers)
 - [The same suite in four languages](#the-same-suite-in-four-languages)
+  - [Rust suite](#rust-suite)
+  - [Rhai suite](#rhai-suite)
+  - [JavaScript suite](#javascript-suite)
+  - [Python suite](#python-suite)
+  - [Per-test setup and teardown](#per-test-setup-and-teardown)
 - [Contract pinning](#contract-pinning)
 - [Using it as a library (axum example)](#using-it-as-a-library-axum-example)
   - [Native-feeling Rust tests: attribute macros](#native-feeling-rust-tests-attribute-macros)
   - [nextest](#nextest)
 - [CLI](#cli)
 - [Load testing](#load-testing)
-- [Python](#python)
+- [Python bindings](#python-bindings)
 - [Tests](#tests)
 - [npm](#npm)
 - [Open questions / next steps](#open-questions--next-steps)
@@ -116,12 +121,15 @@ The regular case should read like the scenario it tests. Here is a multi-actor, 
 #[apitest::fixture(scope = "suite")]
 async fn social_worker(hub_admin: Actor) -> Result<Actor> {
     let email = unique_email("social");
-    hub_admin.call("createUser")
+
+    hub_admin
+        .call("createUser")
         .json(json!({ "email": email, "password": PASSWORD, "role": "social_service" }))
         .expect(201)
         .rollback(|user| hub_admin.call("deleteUser").path("id", &user["id"]).expect(204))
         .await?;
-    Ok(Actor::on("hub").login(email, PASSWORD))   // logs in lazily on first use
+
+    Ok(Actor::on("hub").login(email, PASSWORD)) // logs in lazily on first use
 }
 
 #[apitest::test]
@@ -129,33 +137,78 @@ async fn patient_onboarding(social_worker: Actor) -> Result<()> {
     let (app, mail) = (Actor::on("app"), Actor::on("mail"));
     let email = unique_email("patient");
 
-    step("patient registers as a demo user",
-        app.call("registerPatient").json(json!({ "email": email, "password": PASSWORD, "demo": true })).expect(201)).await?;
+    step(
+        "patient registers as a demo user",
+        app.call("registerPatient")
+            .json(json!({ "email": email, "password": PASSWORD, "demo": true }))
+            .expect(201),
+    )
+    .await?;
     undo(mail.delete("/messages").query("to", &email))?;
 
     step("patient confirms the e-mail by opening the link", async {
-        let message: Mail = eventually!(mail.get("/messages").query("to", &email).expect(200).await?.get("/0"))?;
-        visit(&link_containing(&message.html, "/confirm")?).await
-    }).await?;
+        let message: Mail = eventually!(
+            mail.get("/messages")
+                .query("to", &email)
+                .expect(200)
+                .await?
+                .get("/0")
+        )?;
 
-    let patient = step("patient logs in", Actor::on("app").login(&email, PASSWORD).signed_in()).await?;
+        visit(&link_containing(&message.html, "/confirm")?).await
+    })
+    .await?;
+
+    let patient = step(
+        "patient logs in",
+        Actor::on("app").login(&email, PASSWORD).signed_in(),
+    )
+    .await?;
     undo(patient.call("deletePatient").expect(204))?;
 
-    let code: String = step("patient creates an activation code",
-        patient.call("createActivationCode").expect(201)).await?.get("/code")?;
+    let code: String = step(
+        "patient creates an activation code",
+        patient.call("createActivationCode").expect(201),
+    )
+    .await?
+    .get("/code")?;
 
-    let case = step("social worker identifies the patient by code",
-        social_worker.call("identifyPatient").json(json!({ "activation_code": code })).expect(201)
-            .rollback(|case| social_worker.call("deleteCase").path("id", &case["id"]).expect(204))).await?;
+    let case = step(
+        "social worker identifies the patient by code",
+        social_worker
+            .call("identifyPatient")
+            .json(json!({ "activation_code": code }))
+            .expect(201)
+            .rollback(|case| social_worker.call("deleteCase").path("id", &case["id"]).expect(204)),
+    )
+    .await?;
 
-    step("social worker records therapy data",
-        social_worker.call("putTherapy").path("id", &case["id"])
-            .json(json!({ "plan": "CBT", "sessions_per_week": 2 })).expect(200)).await?;
+    step(
+        "social worker records therapy data",
+        social_worker
+            .call("putTherapy")
+            .path("id", &case["id"])
+            .json(json!({ "plan": "CBT", "sessions_per_week": 2 }))
+            .expect(200),
+    )
+    .await?;
 
-    step("case moves to in progress",
-        social_worker.call("updateCase").path("id", &case["id"]).json(json!({ "status": "in_progress" })).expect(200)).await?;
+    step(
+        "case moves to in progress",
+        social_worker
+            .call("updateCase")
+            .path("id", &case["id"])
+            .json(json!({ "status": "in_progress" }))
+            .expect(200),
+    )
+    .await?;
 
-    let current = social_worker.call("getCase").path("id", &case["id"]).expect(200).await?;
+    let current = social_worker
+        .call("getCase")
+        .path("id", &case["id"])
+        .expect(200)
+        .await?;
+
     assert_json!(current, { "status": "in_progress", "therapy": { "plan": "CBT" } });
     Ok(())
 }
@@ -183,15 +236,27 @@ test apitest::[finally] everything was rolled back ... ok
 
 ```rust
 // before
-let inv = cx.call("billing", "createInvoice")?.json(body).send().await?.expect(201)?;
+let inv = cx
+    .call("billing", "createInvoice")?
+    .json(body)
+    .send()
+    .await?
+    .expect(201)?;
 let id = inv.pointer("/id").cloned().context("no id")?;
+
 cx.defer("delete invoice", move |cx| async move {
-    cx.call("billing", "deleteInvoice")?.path_param("id", id).send().await?.expect(204)?;
+    cx.call("billing", "deleteInvoice")?
+        .path_param("id", id)
+        .send()
+        .await?
+        .expect(204)?;
     Ok(())
 });
 
 // after
-user.call("createInvoice").json(body).expect(201)
+user.call("createInvoice")
+    .json(body)
+    .expect(201)
     .rollback(|inv| user.call("deleteInvoice").path("id", &inv["id"]).expect(204))
     .await?;
 ```
@@ -227,9 +292,10 @@ Actor::on("hub").bearer(token)                         // Authorization: Bearer 
 Actor::on("hub").basic("user", "pw")                   // Authorization: Basic …
 Actor::on("hub").api_key("X-Api-Key", key)             // any header
 Actor::on("hub").login("admin@hub.test", "secret")     // via the service's login flow, lazily
-Actor::on("reports").client_credentials(ClientCredentials::new(token_url, id, secret).scope("reports.read"))
+let creds = ClientCredentials::new(token_url, id, secret).scope("reports.read");
+Actor::on("reports").client_credentials(creds)         // OAuth2 client credentials grant
 actor("hub_admin")?                                    // named actor from apitest.nova / RunConfig
-cx.bearer(token);                                      // every request in this scope without its own auth
+cx.bearer(token);                                      // requests in this scope without own auth
 ```
 
 - **Logins are lazy and cached.** `.login(..)` makes no request. The first request logs in, and concurrent first requests share that single login. The token is cached per service and identity for the run, refreshed before `expires_in`, and re-acquired once if the service answers `401` (for example after a test revoked it). Failures say who and where: `login as 'mallory' on 'svc' failed: status 401: {"error":"bad credentials"}`.
@@ -284,44 +350,46 @@ Every request carries trace context unless you opt out. W3C Trace Context is the
 
 ## The same suite in four languages
 
-<table><tr><td>
+### Rust suite
 
-**Rust** (attribute macros + actors; the builder API also exists)
+Attribute macros and actors; the builder API also exists.
 
 ```rust
 #[apitest::suite]
 fn billing() -> Result<Suite> {
-  Suite::new("billing").pinned("billing", "specs/billing-1.0.yaml")
+    Suite::new("billing").pinned("billing", "specs/billing-1.0.yaml")
 }
 
 /// One login per suite; revoked when the suite ends.
 #[apitest::fixture(scope = "suite")]
 async fn user() -> Result<Actor> {
-  let anon = Actor::on("billing");
-  let token: String = anon.call("issueToken")
-    .form(&[("user", "demo"), ("pass", "secret")])
-    .expect(200).await?
-    .get("/access_token")?;
-  let user = anon.with_bearer(token);
-  undo(user.call("revokeToken").expect(204))?;
-  Ok(user)
+    let anon = Actor::on("billing");
+    let token: String = anon
+        .call("issueToken")
+        .form(&[("user", "demo"), ("pass", "secret")])
+        .expect(200)
+        .await?
+        .get("/access_token")?;
+
+    let user = anon.with_bearer(token);
+    undo(user.call("revokeToken").expect(204))?;
+    Ok(user)
 }
 
 #[apitest::test(parallel)]
 async fn create_invoice(user: Actor) -> Result<()> {
-  user.call("createInvoice")
-    .json(json!({ "amount": 4200, "currency": "EUR" }))
-    .expect(201)
-    .rollback(|inv| user.call("deleteInvoice")
-                        .path("id", &inv["id"]).expect(204))
-    .await?;
-  Ok(())
+    user.call("createInvoice")
+        .json(json!({ "amount": 4200, "currency": "EUR" }))
+        .expect(201)
+        .rollback(|inv| user.call("deleteInvoice").path("id", &inv["id"]).expect(204))
+        .await?;
+    Ok(())
 }
 ```
 
-</td><td>
+### Rhai suite
 
-**Rhai** (`cx.op`, since `.call` is reserved in Rhai)
+`cx.op` instead of `cx.call`, because `call` is reserved in Rhai.
 
 ```rhai
 let s = suite("billing");
@@ -347,9 +415,9 @@ s.test("create invoice", #{ parallel: true }, |cx| {
 s
 ```
 
-</td></tr><tr><td>
+### JavaScript suite
 
-**JavaScript** (sync like k6; one QuickJS runtime per worker/VU)
+Synchronous like k6, with one QuickJS runtime per worker or VU.
 
 ```js
 const s = suite("billing");
@@ -373,9 +441,9 @@ s.test("create invoice", { parallel: true }, (cx) => {
 });
 ```
 
-</td><td>
+### Python suite
 
-**Python** (pytest-style `yield` fixtures)
+pytest-style `yield` fixtures.
 
 ```python
 s = apitest.Suite("billing")
@@ -400,15 +468,22 @@ def create_invoice(cx):
 report = s.run("http://127.0.0.1:8080")
 ```
 
-</td></tr></table>
+### Per-test setup and teardown
 
 Per-test setup/teardown and resource locks look like this in Rhai (other languages are equivalent):
 
 ```rhai
 s.test("per-test setup and teardown", #{
     parallel: true, resources: ["invoices"], timeout_ms: 5000,
-    setup:    |cx| cx.set("invoice_id", cx.op("billing", "createInvoice", #{ json: #{ amount: 1, currency: "USD" } }).expect(201).body.id),
-    teardown: |cx| cx.op("billing", "deleteInvoice", #{ path: #{ id: cx.get("invoice_id") } }).expect(204),
+    setup: |cx| {
+        let invoice = cx.op("billing", "createInvoice", #{ json: #{ amount: 1, currency: "USD" } })
+            .expect(201);
+        cx.set("invoice_id", invoice.body.id)
+    },
+    teardown: |cx| {
+        cx.op("billing", "deleteInvoice", #{ path: #{ id: cx.get("invoice_id") } })
+            .expect(204)
+    },
 }, |cx| { /* body */ });
 ```
 
@@ -457,11 +532,15 @@ suite billing-rust
 // tests/api.rs, with `harness = false` in Cargo.toml
 fn main() {
     apitest::harness::main(|| async {
-        let server = apitest::TestServer::axum(my_app::router(test_state())).await?;   // real TCP, ephemeral port
+        // real TCP on an ephemeral port
+        let server = apitest::TestServer::axum(my_app::router(test_state())).await?;
         let cfg = apitest::RunConfig::new(server.base_url()).var("API_USER", "demo");
+        let scripts =
+            apitest::script::load_suites("tests/api/billing.js".as_ref(), &Default::default())?;
+
         Ok(apitest::harness::Plan::new(cfg)
-            .suite(my_suites::billing()?)                                              // Rust
-            .suites(apitest::script::load_suites("tests/api/billing.js".as_ref(), &Default::default())?) // and/or scripts
+            .suite(my_suites::billing()?) // Rust
+            .suites(scripts)              // and/or scripts
             .keep(server))
     })
 }
@@ -489,7 +568,10 @@ mod billing {                                   // the module is the suite
 
     #[apitest::suite]                           // optional: contracts, hooks, …
     fn billing() -> Result<Suite> {
-        Ok(Suite::new("billing").contract(Contract::pinned("billing", "specs/billing-1.0.yaml")?.live_spec("/openapi.json")))
+        let contract = Contract::pinned("billing", "specs/billing-1.0.yaml")?
+            .live_spec("/openapi.json");
+
+        Ok(Suite::new("billing").contract(contract))
     }
 
     #[apitest::fixture(scope = "suite", teardown = logout)]
@@ -509,7 +591,9 @@ mod billing {                                   // the module is the suite
 fn main() {
     apitest::harness::main(|| async {
         let server = apitest::TestServer::axum(app()).await?;
-        Ok(apitest::harness::Plan::new(apitest::RunConfig::new(server.base_url())).registered()?.keep(server))
+        let cfg = apitest::RunConfig::new(server.base_url());
+
+        Ok(apitest::harness::Plan::new(cfg).registered()?.keep(server))
     })
 }
 ```
@@ -591,7 +675,7 @@ load billing-js
 - The JS frontend gives every worker its own QuickJS runtime, and the load runner sizes the pool to the VU count, so JS VUs run in parallel (k6's model). Python releases the GIL during HTTP. Rhai shares one engine (`sync` feature) across blocking threads.
 - `http.error_rate` counts transport errors and 5xx; `iterations.error_rate` counts failed iterations.
 
-## Python
+## Python bindings
 
 ```bash
 cargo build -p apitest --example demo_server
