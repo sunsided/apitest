@@ -1,5 +1,5 @@
 ---
-applyTo: "crates/apitest/src/script/**,crates/apitest/src/script.rs,crates/apitest/src/harness.rs,crates/apitest/src/registry.rs,crates/apitest/src/context.rs,crates/apitest/src/suite.rs,crates/apitest-macros/**,crates/apitest-py/**,npm/cli/types/**,demo/suites/**"
+applyTo: "crates/apitest/src/script/**,crates/apitest/src/script.rs,crates/apitest/src/cucumber.rs,crates/apitest/src/cucumber/**,crates/apitest/src/harness.rs,crates/apitest/src/registry.rs,crates/apitest/src/context.rs,crates/apitest/src/suite.rs,crates/apitest-macros/**,crates/apitest-py/**,npm/cli/types/**,demo/suites/**"
 ---
 
 <!-- generated from docs/review/frontends.md by scripts/review-index.py; edit the source instead -->
@@ -16,5 +16,15 @@ applyTo: "crates/apitest/src/script/**,crates/apitest/src/script.rs,crates/apite
   it for the failing path.
 - `serial` and `resources` must hold across processes under nextest (`nextest_locks` test).
   Lock changes run `cargo nextest run` with several threads, not only `cargo test`.
+- Gherkin `.feature` files compile into ordinary `Suite`s (`cucumber.rs`); they never get a
+  runner, scheduler or report format of their own. Each Gherkin step runs as a `dsl::step`,
+  step names stay the text as written (`${..}` and `{{..}}` unresolved), and every step is
+  matched at load time, so undefined and ambiguous steps fail the load with `file:line`.
+- A built-in step that sends a request goes through an `Actor` and `Request`, so validation,
+  auth, tracing and redaction apply as in the other frontends. Steps that learn a credential
+  (bearer token, header value) register it with the run's `Redactor` right away.
+- The `--tags` parser and the `.feature` loader handle untrusted input: keep the property
+  tests in `tests/it/props.rs` and the `gherkin` fuzz target passing, and keep arithmetic on
+  user-given durations saturating.
 - The attribute macros generate documented items only, so user crates with `missing_docs`
   stay clean.

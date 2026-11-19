@@ -1,5 +1,5 @@
 ---
-applyTo: "crates/apitest/src/redact.rs,crates/apitest/src/dotenv.rs,crates/apitest/src/runner/vars.rs,crates/apitest/src/auth.rs,crates/apitest/src/dsl/actor.rs,crates/apitest/src/report.rs,crates/apitest/src/context.rs,crates/apitest/src/script/**,crates/apitest-cli/src/main.rs,crates/apitest-cli/src/vars.rs,crates/apitest-cli/src/call.rs,crates/apitest-cli/src/call/**"
+applyTo: "crates/apitest/src/redact.rs,crates/apitest/src/dotenv.rs,crates/apitest/src/runner/vars.rs,crates/apitest/src/auth.rs,crates/apitest/src/dsl/actor.rs,crates/apitest/src/report.rs,crates/apitest/src/context.rs,crates/apitest/src/script/**,crates/apitest/src/cucumber/world.rs,crates/apitest/src/cucumber/builtin.rs,crates/apitest-cli/src/main.rs,crates/apitest-cli/src/vars.rs,crates/apitest-cli/src/call.rs,crates/apitest-cli/src/call/**"
 ---
 
 <!-- generated from docs/review/secrets.md by scripts/review-index.py; edit the source instead -->
