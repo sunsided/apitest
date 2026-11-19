@@ -386,6 +386,7 @@ pub(crate) fn headers(
     let trace_hi = &span.trace_id[..16];
     let trace_lo = &span.trace_id[16..];
     let dec = |hex: &str| u64::from_str_radix(hex, 16).unwrap_or(0).to_string();
+
     for f in &cfg.formats {
         match f {
             TraceFormat::W3c => w3c_headers(span, trace, baggage, &mut out),
@@ -419,6 +420,7 @@ pub(crate) fn headers(
             }
         }
     }
+
     out
 }
 

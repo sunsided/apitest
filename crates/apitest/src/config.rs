@@ -176,28 +176,37 @@ impl ProjectConfig {
         if let Some(u) = &self.base_url {
             base.base_url.clone_from(u);
         }
+
         if let Some(l) = &self.lockfile {
             base.lockfile = Some(self.resolve(l));
         }
+
         if let Some(n) = self.max_parallel {
             base.max_parallel = n;
         }
+
         if let Some(t) = self.test_timeout {
             base.test_timeout = t.0;
         }
+
         if let Some(t) = self.hook_timeout {
             base.hook_timeout = t.0;
         }
+
         base.vars.extend(self.vars.clone());
         base.services.extend(self.services.clone());
+
         if let Some(ua) = &self.user_agent {
             base.user_agent.clone_from(ua);
         }
+
         if let Some(t) = &self.tracing {
             base.tracing = t.clone();
         }
+
         base.auth.extend(self.auth.clone());
         base.actors.extend(self.actors.clone());
+
         base
     }
 }

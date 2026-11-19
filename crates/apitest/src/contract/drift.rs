@@ -103,7 +103,8 @@ impl Contract {
     /// With `used` (the usage recorded in the lockfile), only operations the
     /// suites used are compared, and within them only the parameters, request
     /// fields and statuses they used. Without it, every pinned operation is
-    /// compared in full, and in [`Compat::Strict`] mode operations that only
+    /// compared, using its required parameters, all documented request fields
+    /// and its `2xx` statuses; in [`Compat::Strict`] mode operations that only
     /// exist in `live` are reported as [`Severity::Info`]. `source` is copied
     /// into [`DriftReport::source`].
     #[must_use]
