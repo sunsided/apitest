@@ -2,10 +2,11 @@
 
 use std::path::{Path as FsPath, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
@@ -66,8 +67,31 @@ async fn status(Path(n): Path<u16>) -> StatusCode {
     StatusCode::from_u16(n).unwrap()
 }
 
-/// Starts the service on a free port in a background thread; returns its base URL.
+/// `GET /hop`: a same-origin redirect to `/status/204`.
+async fn hop() -> Redirect {
+    Redirect::to("/status/204")
+}
+
+/// The test service, redirecting `/away` to `away` (another origin).
+fn app(away: &str) -> Router {
+    let away = away.to_string();
+    Router::new()
+        .route("/login", post(login))
+        .route("/me", get(me))
+        .route("/echo", post(echo).get(echo))
+        .route("/status/{n}", get(status))
+        .route("/slow", get(slow))
+        .route("/hop", get(hop))
+        .route("/away", get(move || async move { Redirect::to(&away) }))
+}
+
+/// Starts the test service; returns its base URL.
 fn serve() -> String {
+    serve_app(app("http://127.0.0.1:9/"))
+}
+
+/// Starts `app` on a free port in a background thread; returns its base URL.
+fn serve_app(app: Router) -> String {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -75,12 +99,6 @@ fn serve() -> String {
             .build()
             .unwrap();
         rt.block_on(async move {
-            let app = Router::new()
-                .route("/login", post(login))
-                .route("/me", get(me))
-                .route("/echo", post(echo).get(echo))
-                .route("/status/{n}", get(status))
-                .route("/slow", get(slow));
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             tx.send(l.local_addr().unwrap()).unwrap();
             axum::serve(l, app).await.unwrap();
@@ -395,4 +413,49 @@ fn times_out_instead_of_hanging() {
     let o = apitest(&dir, &["hub", "GET", "/slow", "--timeout", "200ms"]);
     assert_eq!(o.status.code(), Some(2));
     assert!(stderr(&o).contains("no response within"), "{}", stderr(&o));
+}
+
+#[test]
+fn query_strings_in_the_path_are_kept() {
+    let dir = project(&serve(), "");
+    let v = echo_json(&dir, &["hub", "GET", "/echo?a=1", "--query", "page=2"]);
+    assert_eq!(v["query"]["a"], "1");
+    assert_eq!(v["query"]["page"], "2");
+}
+
+#[test]
+fn verbose_redacts_headers_from_the_actor_config() {
+    let dir = project(&serve(), "");
+    let o = apitest(&dir, &["hub", "GET", "/echo", "--as", "tenant", "-v"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stderr(&o).contains("X-Tenant: ***"), "{}", stderr(&o));
+}
+
+#[test]
+fn same_origin_redirects_are_followed() {
+    let dir = project(&serve(), "");
+    let o = apitest(&dir, &["hub", "GET", "/hop", "--as", "monitor"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+}
+
+#[test]
+fn cross_origin_redirects_are_not_followed() {
+    let seen: Arc<Mutex<Vec<HeaderMap>>> = Arc::default();
+    let record = Arc::clone(&seen);
+    let other = serve_app(Router::new().fallback(move |h: HeaderMap| {
+        record.lock().unwrap().push(h);
+        async { "elsewhere" }
+    }));
+    let dir = project(&serve_app(app(&format!("{other}/steal"))), "");
+
+    let o = apitest(&dir, &["hub", "GET", "/away", "--as", "monitor"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("status 303 (expected 2xx)"), "{err}");
+    assert!(
+        err.contains(&format!("redirect to {other}/steal not followed")),
+        "{err}"
+    );
+    // The other host is never contacted, so it never sees the API key.
+    assert!(seen.lock().unwrap().is_empty());
 }

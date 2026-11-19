@@ -708,6 +708,7 @@ apitest call hub DELETE /users/7 --as hub_admin --expect 204 -v             # -v
   ```
 
 - **Actors stay intact.** An actor must belong to the service it's sent to, and a `-H` for a header the actor sets (its credentials, `headers:` or `user_agent:`) is refused instead of silently replacing the actor's value.
+- **Redirects stay on the service.** Redirects are followed only within the service's origin (scheme, host and port), at most 10 times. A redirect to another origin is not followed: the 3xx is the result (exit 1), and its target is named on stderr, so an API key, an actor's `headers:` or a `-H` value never reach another host.
 
 ## Load testing
 
