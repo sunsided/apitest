@@ -12,8 +12,9 @@
 //!     td --> lock[update lockfile]
 //! ```
 
+mod drift;
+
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -24,9 +25,10 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::context::{Ctx, Scope, Shared, guarded, guarded_value};
-use crate::contract::{
-    Contract, DriftReport, Finding, LiveSpec, LockedContract, Lockfile, OpUsage, Severity, Spec,
-};
+pub use drift::check_drift;
+pub(crate) use drift::drift_failure;
+
+use crate::contract::{Contract, DriftReport, DriftTarget, Lockfile};
 use crate::report::{Outcome, StepReport, SuiteReport, TestReport};
 use crate::suite::{Concurrency, HookKind, Suite, TestCase};
 
@@ -50,8 +52,16 @@ pub struct RunConfig {
     pub lockfile: Option<PathBuf>,
     /// Merge this run's contract usage into the lockfile afterwards.
     pub update_lock: bool,
-    /// Fail the suite before running tests if the live spec broke the used surface.
+    /// Fail the suite before running tests if a compared spec broke the used surface.
     pub check_drift: bool,
+    /// Named comparison specs (`dev`, `qa`, `prod`, `branch`, ...), each with a file
+    /// or URL per contract, to diff the pins against instead of or besides the live
+    /// spec. The names `live` and `all` are reserved.
+    pub drift_targets: BTreeMap<String, DriftTarget>,
+    /// Which targets the drift check compares against, in order: `live` (each
+    /// contract's own live spec), names from [`RunConfig::drift_targets`], or `all`
+    /// (live plus every named target). Empty means `["live"]`.
+    pub drift_against: Vec<String>,
     /// Only run tests whose name contains one of these substrings (empty = all).
     pub only: Vec<String>,
     /// Upper bound for concurrently running `parallel` tests.
@@ -85,6 +95,8 @@ impl Default for RunConfig {
             lockfile: None,
             update_lock: false,
             check_drift: true,
+            drift_targets: BTreeMap::new(),
+            drift_against: vec![],
             only: vec![],
             max_parallel: std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
             quiet: false,
@@ -321,192 +333,6 @@ fn same_origin_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::red
     }
 
     attempt.follow()
-}
-
-/// Fetches live specs and diffs them against the pinned ones.
-///
-/// Contracts without a live spec are skipped. With a lockfile whose pin matches,
-/// only the recorded used surface is checked; otherwise every operation. With
-/// [`RunConfig::drift_cache`] set, results are read from and written to that
-/// directory so concurrent processes of one run diff each contract only once.
-///
-/// # Errors
-///
-/// Fails if the lockfile cannot be read or parsed, a contract's service is unknown, the live
-/// spec cannot be fetched or parsed, or a result cannot be serialized for the cache.
-pub async fn check_drift(contracts: &[Arc<Contract>], cfg: &RunConfig) -> Result<Vec<DriftReport>> {
-    let lock = match &cfg.lockfile {
-        Some(p) => Lockfile::load(p)?,
-        None => None,
-    };
-    let http = reqwest::Client::new();
-
-    let mut out = vec![];
-    for c in contracts {
-        let Some(live) = &c.live_spec else { continue };
-        let locked = lock.as_ref().and_then(|l| l.contract.get(&c.name));
-        out.push(contract_drift(c, live, locked, cfg, &http).await?);
-    }
-
-    Ok(out)
-}
-
-/// Drift report of one contract, from the cache if possible.
-async fn contract_drift(
-    c: &Contract,
-    live: &LiveSpec,
-    locked: Option<&LockedContract>,
-    cfg: &RunConfig,
-    http: &reqwest::Client,
-) -> Result<DriftReport> {
-    let (used, notes) = used_surface(c, locked);
-    let cache_file = cfg.drift_cache.as_ref().map(|dir| {
-        dir.join(format!(
-            "drift-{}.json",
-            drift_cache_key(c, live, used, cfg)
-        ))
-    });
-    if let Some(cached) = cache_file.as_deref().and_then(read_cached_drift) {
-        return Ok(cached);
-    }
-
-    let (spec, source) = fetch_live_spec(c, live, cfg, http).await?;
-    let mut report = c.diff(&spec, used, &source);
-    report.findings.splice(0..0, notes);
-    if let Some(file) = &cache_file {
-        write_cached_drift(file, &report)?;
-    }
-
-    Ok(report)
-}
-
-/// The used surface to check, from the lockfile if its pin matches the contract's.
-///
-/// A stale lockfile entry yields `None` (check everything) plus an info finding
-/// explaining why.
-fn used_surface<'a>(
-    c: &Contract,
-    locked: Option<&'a LockedContract>,
-) -> (Option<&'a [OpUsage]>, Vec<Finding>) {
-    match locked {
-        Some(l) if l.sha256 == c.pinned.sha256 => (Some(l.used.as_slice()), vec![]),
-        Some(l) => {
-            let note = Finding {
-                severity: Severity::Info,
-                operation: "-".into(),
-                location: "lockfile".into(),
-                message: format!(
-                    "pinned spec changed since the lockfile was written (lock: v{}, now: v{}); checking all operations",
-                    l.version, c.pinned.version
-                ),
-            };
-            (None, vec![note])
-        }
-        None => (None, vec![]),
-    }
-}
-
-/// A cached drift report, if `file` exists and parses.
-fn read_cached_drift(file: &Path) -> Option<DriftReport> {
-    let bytes = std::fs::read(file).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// Caches a drift report. I/O failures are ignored: the cache is an optimization.
-///
-/// # Errors
-///
-/// Fails only if the report cannot be serialized.
-fn write_cached_drift(file: &Path, report: &DriftReport) -> Result<()> {
-    // Write-then-rename so concurrent processes never read a partial file.
-    let _ = std::fs::create_dir_all(file.parent().unwrap_or(Path::new(".")));
-    let tmp = file.with_extension(format!("tmp{}", std::process::id()));
-    if std::fs::write(&tmp, serde_json::to_vec(report)?).is_ok() {
-        let _ = std::fs::rename(&tmp, file);
-    }
-
-    Ok(())
-}
-
-/// Loads a contract's live spec and describes where it came from.
-///
-/// # Errors
-///
-/// Fails if the contract's service is unknown, the request fails or returns an
-/// error status, or the document is not a valid spec.
-async fn fetch_live_spec(
-    c: &Contract,
-    live: &LiveSpec,
-    cfg: &RunConfig,
-    http: &reqwest::Client,
-) -> Result<(Spec, String)> {
-    match live {
-        LiveSpec::Document(doc) => Ok((
-            Spec::from_value(doc, String::new())?,
-            "in-process document".to_string(),
-        )),
-        LiveSpec::Url(u) => {
-            let url = live_url(u, cfg.contract_url(c)?);
-            let resp = http
-                .get(&url)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                .with_context(|| {
-                    format!("fetching live spec of contract '{}' from {url}", c.name)
-                })?;
-            let bytes = resp.bytes().await?;
-            let ext = is_yaml_url(&url).then_some("yaml");
-            Ok((Spec::from_bytes(&bytes, ext)?, url))
-        }
-    }
-}
-
-/// `true` if `url` ends in `.yaml` or `.yml` (case-sensitive, like the server's path).
-fn is_yaml_url(url: &str) -> bool {
-    url.rsplit_once('.')
-        .is_some_and(|(_, ext)| ext == "yaml" || ext == "yml")
-}
-
-/// Absolute URL of a live spec: `u` itself if absolute, else `u` appended to `base`.
-fn live_url(u: &str, base: &str) -> String {
-    if u.starts_with("http://") || u.starts_with("https://") {
-        u.to_string()
-    } else {
-        format!("{}{}", base.trim_end_matches('/'), u)
-    }
-}
-
-/// Everything that influences a drift result: contract, pin, live source, used surface, mode.
-///
-/// Returns the first 12 bytes of a SHA-256 over those inputs as 24 hex characters.
-fn drift_cache_key(
-    c: &Contract,
-    live: &LiveSpec,
-    used: Option<&[OpUsage]>,
-    cfg: &RunConfig,
-) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut h = Sha256::new();
-    h.update(c.name.as_bytes());
-    h.update(c.pinned.sha256.as_bytes());
-    h.update(format!("{:?}", c.mode).as_bytes());
-    match live {
-        LiveSpec::Url(u) => {
-            h.update(live_url(u, cfg.contract_url(c).unwrap_or(&cfg.base_url)).as_bytes());
-        }
-        LiveSpec::Document(d) => h.update(d.to_string().as_bytes()),
-    }
-
-    h.update(serde_json::to_vec(&used).unwrap_or_default());
-    h.finalize()
-        .iter()
-        .take(12)
-        .fold(String::with_capacity(24), |mut key, b| {
-            let _ = write!(key, "{b:02x}");
-            key
-        })
 }
 
 /// Runs fixtures of `scope` in declaration order, registering their teardowns.
@@ -752,17 +578,10 @@ async fn drift_gate(
     *drift = check_drift(&suite.contracts, cfg)
         .await
         .map_err(|e| (e.context("contract check"), "contract check failed"))?;
-    if cfg.check_drift && drift.iter().any(DriftReport::is_breaking) {
-        let names: Vec<_> = drift
-            .iter()
-            .filter(|d| d.is_breaking())
-            .map(|d| d.contract.clone())
-            .collect();
-        let error = anyhow!(
-            "live API is incompatible with pinned contract(s): {}",
-            names.join(", ")
-        );
-        return Err((error, "contract drift"));
+    if cfg.check_drift
+        && let Some(error) = drift_failure(drift)
+    {
+        return Err((anyhow!(error), "contract drift"));
     }
 
     Ok(())

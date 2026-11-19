@@ -350,7 +350,8 @@ fn standard_trials(
     trials
 }
 
-/// The `suite::[contract] name` trial: fails with all findings if the drift is breaking.
+/// The `suite::[contract] name` trial (`name @ target` for a named drift
+/// target): fails with all findings if the drift is breaking.
 fn contract_trial(suite: &str, d: &DriftReport) -> Trial {
     let msg = d
         .findings
@@ -365,7 +366,7 @@ fn contract_trial(suite: &str, d: &DriftReport) -> Trial {
         .join("\n");
     let breaking = d.is_breaking();
 
-    Trial::test(format!("{suite}::[contract] {}", d.contract), move || {
+    Trial::test(format!("{suite}::[contract] {}", d.label()), move || {
         if breaking {
             Err(Failed::from(msg))
         } else {
@@ -437,8 +438,9 @@ fn suite_problems(r: &SuiteReport) -> Vec<String> {
             .map(|f| format!("  {} @ {}: {}", f.operation, f.location, f.message))
             .collect();
         problems.push(format!(
-            "contract '{}': live v{} is incompatible with pinned v{}:\n{}",
+            "contract '{}': {} v{} is incompatible with pinned v{}:\n{}",
             d.contract,
+            d.target,
             d.live_version,
             d.pinned_version,
             findings.join("\n")

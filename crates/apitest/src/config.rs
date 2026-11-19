@@ -21,13 +21,20 @@
 //! reports:
 //!   junit: target/apitest/junit.xml
 //!   json: target/apitest/report.json
+//! drift:
+//!   against: [live, prod]
+//!   targets:
+//!     prod:
+//!       billing: specs/billing-prod.yaml
+//!     dev:
+//!       billing: https://billing.dev.example.com/openapi.json
 //! ```
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::runner::RunConfig;
@@ -74,6 +81,19 @@ pub struct Reports {
     pub json: Option<PathBuf>,
 }
 
+/// What the contract drift check compares the pins against (`drift:`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Drift {
+    /// Targets checked by default (`live`, names from `targets`, `all`).
+    /// Empty: `live` only. `--against` on the command line replaces it.
+    pub against: Vec<String>,
+    /// Named comparison specs: target → contract → file path (relative to
+    /// [`ProjectConfig::root`]) or `http(s)://` URL. Never uses the reserved
+    /// names `live` or `all` once parsed.
+    pub targets: BTreeMap<String, BTreeMap<String, String>>,
+}
+
 /// The contents of `apitest.nova`. Every field is optional; unset fields keep
 /// the [`RunConfig`] defaults when applied with [`ProjectConfig::apply`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -107,6 +127,8 @@ pub struct ProjectConfig {
     pub auth: BTreeMap<String, crate::auth::LoginFlow>,
     /// Named actors; `${VAR}` in credentials is resolved from vars / the environment.
     pub actors: BTreeMap<String, crate::auth::ActorConfig>,
+    /// Comparison specs for the contract drift check.
+    pub drift: Drift,
     /// Directory the file was loaded from; relative paths resolve against it.
     #[serde(skip)]
     pub root: PathBuf,
@@ -134,9 +156,20 @@ impl ProjectConfig {
     /// # Errors
     ///
     /// Fails when `text` is not valid NOVA or does not match the schema; the
-    /// message lists every issue with its path.
+    /// message lists every issue with its path. Also fails when a drift target
+    /// uses a reserved name (`live`, `all`).
     pub fn parse(text: &str, what: &str) -> Result<ProjectConfig> {
-        from_nova(text, CONFIG_SCHEMA, what)
+        let cfg: ProjectConfig = from_nova(text, CONFIG_SCHEMA, what)?;
+        if let Some(name) = cfg
+            .drift
+            .targets
+            .keys()
+            .find(|n| *n == crate::contract::LIVE || *n == crate::contract::ALL)
+        {
+            bail!("{what}: drift target name '{name}' is reserved");
+        }
+
+        Ok(cfg)
     }
 
     /// Looks for `apitest.nova` in `dir` and its parents and loads the
@@ -170,7 +203,8 @@ impl ProjectConfig {
 
     /// Applies this config on top of `base`. Set scalar fields replace the
     /// base value; maps (`vars`, `services`, `auth`, `actors`) are merged, with
-    /// this config winning on equal keys.
+    /// this config winning on equal keys. Drift targets are merged per contract,
+    /// and a non-empty `drift.against` replaces the base selection.
     #[must_use]
     pub fn apply(&self, mut base: RunConfig) -> RunConfig {
         if let Some(u) = &self.base_url {
@@ -206,8 +240,25 @@ impl ProjectConfig {
 
         base.auth.extend(self.auth.clone());
         base.actors.extend(self.actors.clone());
+        self.apply_drift(&mut base);
 
         base
+    }
+
+    /// Merges `drift:` into `base`, resolving file specs against
+    /// [`ProjectConfig::root`].
+    fn apply_drift(&self, base: &mut RunConfig) {
+        for (name, specs) in &self.drift.targets {
+            let target = base.drift_targets.entry(name.clone()).or_default();
+            for (contract, spec) in specs {
+                let source = crate::contract::SpecSource::parse(spec, &self.root);
+                target.specs.insert(contract.clone(), source);
+            }
+        }
+
+        if !self.drift.against.is_empty() {
+            base.drift_against.clone_from(&self.drift.against);
+        }
     }
 }
 
@@ -317,6 +368,54 @@ actors:
         .unwrap_err()
         .to_string();
         assert!(bad.contains("actors.x.auth.type"), "{bad}");
+    }
+
+    #[test]
+    fn drift_targets_in_config() {
+        let mut cfg = ProjectConfig::parse(
+            "drift:\n  against: [prod, live]\n  targets:\n    prod:\n      billing: specs/billing-prod.yaml\n    dev:\n      billing: https://dev.example.test/openapi.json\n",
+            "apitest.nova",
+        )
+        .unwrap();
+        cfg.root = PathBuf::from("/proj");
+        let run = cfg.apply(RunConfig::default());
+        assert_eq!(
+            run.drift_targets["prod"].specs["billing"],
+            crate::contract::SpecSource::File("/proj/specs/billing-prod.yaml".into())
+        );
+        assert_eq!(
+            run.drift_targets["dev"].specs["billing"],
+            crate::contract::SpecSource::Url("https://dev.example.test/openapi.json".into())
+        );
+        assert_eq!(run.selected_drift_targets().unwrap(), ["prod", "live"]);
+
+        // Config targets merge into programmatic ones per contract.
+        let merged = cfg.apply(RunConfig::default().drift_target(
+            "prod",
+            crate::contract::DriftTarget::new().file("hub", "/hub.yaml"),
+        ));
+        assert_eq!(merged.drift_targets["prod"].specs.len(), 2);
+    }
+
+    #[test]
+    fn drift_config_errors() {
+        let err = ProjectConfig::parse(
+            "drift:\n  targets:\n    live:\n      billing: a.yaml\n",
+            "apitest.nova",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("drift target name 'live' is reserved"),
+            "{err}"
+        );
+        let err = ProjectConfig::parse(
+            "drift:\n  targets:\n    qa:\n      billing: \"\"\n",
+            "apitest.nova",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("drift.targets"), "{err}");
     }
 
     #[test]

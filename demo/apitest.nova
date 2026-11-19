@@ -1,6 +1,6 @@
 # apitest project config (NOVA). Run from this directory: apitest run
 # Schema: crates/apitest/schemas/apitest-config.novs
-@schema apitest-config@0.1.0
+@schema apitest-config@0.2.0
 
 base_url: http://127.0.0.1:8080
 lockfile: apitest.lock.nova
@@ -19,3 +19,13 @@ suites:
 reports:
   junit: ../target/apitest/junit.xml
   json: ../target/apitest/report.json
+
+# Comparison specs for the drift check (default: live only).
+#   apitest contract check --against qa,next      # no running service needed
+#   apitest run --against live,qa
+drift:
+  targets:
+    qa:
+      billing: specs/billing-1.1.yaml
+    next:
+      billing: specs/billing-2.0.yaml

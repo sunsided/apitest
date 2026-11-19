@@ -1,5 +1,5 @@
 ---
-applyTo: "crates/apitest/src/contract.rs,crates/apitest/src/http.rs,crates/apitest/src/runner.rs,crates/apitest/schemas/**,demo/specs/**"
+applyTo: "crates/apitest/src/contract.rs,crates/apitest/src/contract/**,crates/apitest/src/runner/drift.rs,crates/apitest-cli/src/drift.rs,crates/apitest/src/http.rs,crates/apitest/src/runner.rs,crates/apitest/schemas/**,demo/specs/**"
 ---
 
 <!-- generated from docs/review/contracts.md by scripts/review-index.py; edit the source instead -->

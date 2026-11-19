@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod call;
+mod drift;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -49,9 +50,12 @@ struct Common {
     /// Lockfile path (default from config, else apitest.lock.nova next to the config).
     #[arg(long)]
     lockfile: Option<PathBuf>,
-    /// Do not fail when the live spec is incompatible with the pinned one.
+    /// Do not fail when a compared spec is incompatible with the pinned one.
     #[arg(long)]
     no_drift_check: bool,
+    /// Drift targets to compare against.
+    #[command(flatten)]
+    drift: drift::Flags,
     /// Suppress `cx.log()` output.
     #[arg(long, short = 'q')]
     quiet: bool,
@@ -190,7 +194,8 @@ struct LoadArgs {
 /// Subcommands of `apitest contract`.
 #[derive(Subcommand)]
 enum ContractCmd {
-    /// Diff the live specs of the suites' contracts against their pins (no tests run).
+    /// Diff the suites' contracts against their pins (no tests run): the live
+    /// specs, or the drift targets chosen with --against.
     Check {
         /// Suite files (.rhai, .js). Default: `suites` from the config.
         files: Vec<PathBuf>,
@@ -269,6 +274,7 @@ fn run_config(common: &Common, project: Option<&ProjectConfig>) -> Result<RunCon
     }
 
     cfg.check_drift = !common.no_drift_check;
+    common.drift.apply(&mut cfg)?;
     cfg.quiet = common.quiet;
     common.request.apply(&mut cfg)?;
 
@@ -286,6 +292,29 @@ fn suite_files(files: &[PathBuf], project: Option<&ProjectConfig>) -> Result<Vec
         Some(p) if !p.suites.is_empty() => Ok(p.suites.iter().map(|s| p.resolve(s)).collect()),
         _ => bail!("no suite files given and no `suites` in apitest.nova"),
     }
+}
+
+/// Loads every suite of the files to run (see [`suite_files`]).
+fn load_all(
+    files: &[PathBuf],
+    project: Option<&ProjectConfig>,
+    opts: &LoadOptions,
+) -> Result<Vec<Suite>> {
+    let mut suites = vec![];
+    for f in suite_files(files, project)? {
+        suites.extend(load_suites(&f, opts)?);
+    }
+
+    Ok(suites)
+}
+
+/// The project whose other suites [`drift::check_targets`] must also look at:
+/// only when files were given, since otherwise every project suite is loaded.
+fn extra_project<'a>(
+    files: &[PathBuf],
+    project: Option<&'a ProjectConfig>,
+) -> Option<&'a ProjectConfig> {
+    project.filter(|_| !files.is_empty())
 }
 
 /// Writes `content` to `path`, creating missing parent directories.
@@ -331,15 +360,16 @@ async fn run_tests(args: RunArgs) -> Result<bool> {
     let opts = LoadOptions {
         js_workers: project.as_ref().and_then(|p| p.js_workers).unwrap_or(2),
     };
+    let suites = load_all(&args.files, project.as_ref(), &opts)?;
+    drift::check_targets(&cfg, &suites, extra_project(&args.files, project.as_ref()))?;
+
     let color = diagnostic::use_color(&std::io::stdout());
     let mut reports = vec![];
-    for f in suite_files(&args.files, project.as_ref())? {
-        for s in load_suites(&f, &opts)? {
-            let r = run_suite(&s, &cfg).await;
-            // miette on the terminal; the JUnit and JSON reports stay plain.
-            print!("{}", r.render_terminal(color));
-            reports.push(r);
-        }
+    for s in &suites {
+        let r = run_suite(s, &cfg).await;
+        // miette on the terminal; the JUnit and JSON reports stay plain.
+        print!("{}", r.render_terminal(color));
+        reports.push(r);
     }
 
     let junit = args.junit.or_else(|| {
@@ -389,6 +419,7 @@ async fn run_load_test(args: LoadArgs) -> Result<bool> {
             js_workers: max_vus(&scenario.executor).max(1),
         },
     )?;
+    drift::check_targets(&cfg, &suites, project.as_ref())?;
     let s = pick_suite(suites, args.suite.as_deref())?;
 
     let report = run_load(&LoadPlan::new(s).scenario(scenario), &cfg).await;
@@ -467,21 +498,24 @@ fn pick_suite(mut suites: Vec<Suite>, name: Option<&str>) -> Result<Suite> {
 async fn contract_check(files: &[PathBuf], common: &Common) -> Result<bool> {
     let project = project(common)?;
     let cfg = run_config(common, project.as_ref())?;
+    let suites = load_all(files, project.as_ref(), &LoadOptions::default())?;
+    drift::check_targets(&cfg, &suites, extra_project(files, project.as_ref()))?;
+
     let mut ok = true;
-    for f in suite_files(files, project.as_ref())? {
-        for s in load_suites(&f, &LoadOptions::default())? {
-            for d in check_drift(&s.contracts, &cfg).await? {
-                println!(
-                    "{} / {}: pinned v{} vs live v{} → {}",
-                    s.name,
-                    d.contract,
-                    d.pinned_version,
-                    d.live_version,
-                    verdict(&d)
-                );
-                print_findings(&d);
-                ok &= !d.is_breaking();
-            }
+    for s in &suites {
+        for d in check_drift(&s.contracts, &cfg).await? {
+            println!(
+                "{} / {}: pinned v{} vs {} v{} ({}) → {}",
+                s.name,
+                d.contract,
+                d.pinned_version,
+                d.target,
+                d.live_version,
+                d.source,
+                verdict(&d)
+            );
+            print_findings(&d);
+            ok &= !d.is_breaking();
         }
     }
 

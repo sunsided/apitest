@@ -502,7 +502,7 @@ pub struct ScenarioReport {
 pub struct LoadReport {
     /// Suite name.
     pub suite: String,
-    /// Drift-check results, one per contract with a live spec.
+    /// Drift-check results, one per contract and selected drift target it has a spec for.
     pub drift: Vec<DriftReport>,
     /// Why the run stopped before or between scenarios, if it did.
     pub setup_error: Option<String>,
@@ -539,8 +539,8 @@ impl LoadReport {
             };
             let _ = writeln!(
                 s,
-                "  contract {}: pinned v{} vs live v{} → {verdict}",
-                d.contract, d.pinned_version, d.live_version,
+                "  contract {}: pinned v{} vs {} v{} → {verdict}",
+                d.contract, d.pinned_version, d.target, d.live_version,
             );
         }
 
@@ -658,8 +658,10 @@ async fn preflight(
     *drift = check_drift(&suite.contracts, cfg)
         .await
         .map_err(|e| format!("contract check: {e:#}"))?;
-    if cfg.check_drift && drift.iter().any(DriftReport::is_breaking) {
-        return Err("live API is incompatible with the pinned contract".into());
+    if cfg.check_drift
+        && let Some(error) = crate::runner::drift_failure(drift)
+    {
+        return Err(error);
     }
 
     Ok(shared)

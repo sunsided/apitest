@@ -85,7 +85,7 @@ pub use dsl::Actor;
 pub mod prelude {
     pub use crate::auth::{Auth, ClientCredentials, LoginFlow};
     pub use crate::context::{Ctx, Scope};
-    pub use crate::contract::{Compat, Contract};
+    pub use crate::contract::{Compat, Contract, DriftTarget};
     pub use crate::dsl::{
         Actor, actor, current_trace, defer, env, json_includes, link_containing, links, step, undo,
         unique, unique_email, visit,

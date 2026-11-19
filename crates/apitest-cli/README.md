@@ -26,6 +26,7 @@ apitest load suites/billing.js -t "create and fetch invoice" \
   --stages "10s:20,30s:20,10s:0" --threshold "http.p95 < 50ms"
 apitest contract check suites/billing.rhai -u http://127.0.0.1:8080
 apitest contract diff specs/billing-1.0.yaml specs/billing-2.0.yaml
+apitest contract check --against qa,next                   # drift vs targets from apitest.nova, no server
 apitest call hub GET /users/me --as hub_admin              # one request, no suite or spec
 ```
 

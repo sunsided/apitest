@@ -123,7 +123,7 @@ pub struct SuiteReport {
     pub setup_chain: Vec<String>,
     /// Suite-level teardown failures (`after_all`, suite/vu cleanups).
     pub teardown_errors: Vec<String>,
-    /// Drift-check results, one per contract with a live spec.
+    /// Drift-check results, one per contract and selected drift target it has a spec for.
     pub drift: Vec<DriftReport>,
     /// Wall-clock duration of the whole suite in milliseconds.
     pub duration_ms: f64,
@@ -245,8 +245,8 @@ fn render_drift(s: &mut String, d: &DriftReport) {
     };
     let _ = writeln!(
         s,
-        "  contract {}: pinned v{} vs live v{} ({}) → {verdict}  [{}]",
-        d.contract, d.pinned_version, d.live_version, d.source, d.scope
+        "  contract {}: pinned v{} vs {} v{} ({}) → {verdict}  [{}]",
+        d.contract, d.pinned_version, d.target, d.live_version, d.source, d.scope
     );
     for f in &d.findings {
         let tag = match f.severity {
@@ -356,8 +356,8 @@ impl<'a> SuiteCases<'a> {
 /// Renders suites as a `JUnit` XML document (`<testsuites>`), the de-facto standard
 /// understood by GitHub Actions, GitLab, Jenkins, Azure DevOps, IDEs, ...
 ///
-/// Contract drift checks appear as `[contract] <name>` test cases, suite-level
-/// setup and teardown failures as `[setup]` / `[teardown]` cases, so they show
+/// Contract drift checks appear as `[contract] <name>` test cases (`<name> @ <target>`
+/// for named drift targets), suite-level setup and teardown failures as `[setup]` / `[teardown]` cases, so they show
 /// up in CI dashboards like any other failure.
 #[must_use]
 pub fn junit_xml(suites: &[SuiteReport]) -> String {
@@ -402,7 +402,7 @@ fn contract_case(suite: &str, d: &DriftReport) -> String {
     let mut c = format!(
         "    <testcase classname=\"{}\" name=\"[contract] {}\" time=\"0\">\n",
         esc(suite),
-        esc(&d.contract)
+        esc(&d.label())
     );
     if d.is_breaking() {
         let body: Vec<String> = d
@@ -413,7 +413,8 @@ fn contract_case(suite: &str, d: &DriftReport) -> String {
             .collect();
         let _ = writeln!(
             c,
-            "      <failure type=\"ContractDrift\" message=\"live spec v{} is incompatible with pinned v{}\">{}</failure>",
+            "      <failure type=\"ContractDrift\" message=\"{} spec v{} is incompatible with pinned v{}\">{}</failure>",
+            esc(&d.target),
             esc(&d.live_version),
             esc(&d.pinned_version),
             esc(&body.join("\n"))
