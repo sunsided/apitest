@@ -50,6 +50,7 @@ pub struct SentRequest {
 
 impl SentRequest {
     /// Case-insensitive header lookup.
+    #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -77,6 +78,7 @@ pub struct Response {
 
 impl Response {
     /// Case-insensitive response header lookup.
+    #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -148,11 +150,13 @@ impl Response {
     }
 
     /// JSON pointer into the body, e.g. `/items/0/id`.
+    #[must_use]
     pub fn pointer(&self, ptr: &str) -> Option<&Value> {
         self.body.pointer(ptr)
     }
 
     /// The response as a plain value (what scripts receive).
+    #[must_use]
     pub fn to_value(&self) -> Value {
         serde_json::to_value(self).expect("response is serializable")
     }
@@ -333,6 +337,7 @@ impl<'a> Request<'a> {
     }
 
     /// Short description for logs and cleanup labels, e.g. `hub:deleteUser {id=7}`.
+    #[must_use]
     pub fn describe(&self) -> String {
         let target = match &self.target {
             Target::Raw { method, path } => format!("{method} {path}"),
@@ -729,7 +734,7 @@ fn encode_segment(s: &str) -> String {
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(b as char);
             }
             _ => out.push_str(&format!("%{b:02X}")),
         }

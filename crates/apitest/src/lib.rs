@@ -6,7 +6,7 @@
 //!    (`run` → `suite` → `vu` → `test`). Anything registered with
 //!    [`Ctx::defer`] runs in LIFO order when its scope ends, even if the test
 //!    failed, panicked or timed out.
-//! 2. **Contracts are pinned per operation.** A suite binds to an OpenAPI
+//! 2. **Contracts are pinned per operation.** A suite binds to an `OpenAPI`
 //!    document by `operationId`. Requests and responses are validated against
 //!    the pinned spec, the operations and fields a suite actually uses are
 //!    recorded in `apitest.lock`, and the live spec of the service is diffed

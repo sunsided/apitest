@@ -66,7 +66,7 @@ pub struct NovaDuration(#[serde(with = "novafile_serde::with::duration")] pub Du
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Reports {
-    /// JUnit XML report path.
+    /// `JUnit` XML report path.
     pub junit: Option<PathBuf>,
     /// JSON report path.
     pub json: Option<PathBuf>,
@@ -129,6 +129,7 @@ impl ProjectConfig {
         Ok(None)
     }
 
+    #[must_use]
     pub fn resolve(&self, p: &Path) -> PathBuf {
         if p.is_absolute() {
             p.to_path_buf()
@@ -138,6 +139,7 @@ impl ProjectConfig {
     }
 
     /// Applies this config on top of `base`.
+    #[must_use]
     pub fn apply(&self, mut base: RunConfig) -> RunConfig {
         if let Some(u) = &self.base_url {
             base.base_url = u.clone();

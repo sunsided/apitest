@@ -1,7 +1,7 @@
-//! JavaScript frontend (QuickJS via rquickjs).
+//! JavaScript frontend (`QuickJS` via rquickjs).
 //!
 //! Scripts are synchronous like k6 scripts: `cx.http(...)` blocks the script
-//! and returns the response. Each worker thread owns an independent QuickJS
+//! and returns the response. Each worker thread owns an independent `QuickJS`
 //! runtime that evaluated the whole script ("init code runs per worker"). Under
 //! load there is one worker per VU, so VUs run truly in parallel.
 //!
@@ -118,7 +118,7 @@ struct Job {
     reply: oneshot::Sender<Result<Value>>,
 }
 
-/// A pool of QuickJS runtimes that all evaluated the same script.
+/// A pool of `QuickJS` runtimes that all evaluated the same script.
 struct Pool {
     senders: Vec<mpsc::Sender<Job>>,
     in_flight: Vec<AtomicUsize>,
@@ -199,7 +199,7 @@ fn install_natives<'js>(
     pool: &Weak<Pool>,
     worker: usize,
 ) -> rquickjs::Result<()> {
-    fn throw<'js>(ctx: &Ctx<'js>, e: anyhow::Error) -> rquickjs::Error {
+    fn throw(ctx: &Ctx<'_>, e: anyhow::Error) -> rquickjs::Error {
         Exception::throw_message(ctx, &format!("{e:#}"))
     }
     let s = sync.clone();
@@ -251,7 +251,7 @@ fn install_natives<'js>(
     n.set(
         "vu",
         Function::new(ctx.clone(), move || -> i32 {
-            s.vu().map(|v| v as i32).unwrap_or(-1)
+            s.vu().map_or(-1, |v| v as i32)
         })?,
     )?;
     let s = sync.clone();

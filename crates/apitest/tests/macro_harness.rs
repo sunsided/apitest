@@ -1,14 +1,14 @@
 //! The billing suite written with attribute macros: module = suite, fixtures are
 //! injected by parameter name, test ids are module paths.
 //!
-//! cargo test -p apitest --features full --test macro_harness
-//! cargo test -p apitest --features full --test macro_harness -- billing::create_and_fetch_invoice --exact
-//! cargo nextest run -p apitest --features full --test macro_harness
+//! cargo test -p apitest --features full --test `macro_harness`
+//! cargo test -p apitest --features full --test `macro_harness` -- `billing::create_and_fetch_invoice` --exact
+//! cargo nextest run -p apitest --features full --test `macro_harness`
 
 #[path = "support/demo_server.rs"]
 mod demo;
 #[path = "support/rust_suite.rs"]
-#[allow(unused)]
+#[expect(unused)]
 mod rust_suite;
 
 mod billing {

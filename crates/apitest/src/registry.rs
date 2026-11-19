@@ -60,16 +60,11 @@ pub static SUITES: [SuiteDef];
 
 /// `crate::billing::admin` → `billing::admin`; `crate` → `crate`.
 fn relative_module(module: &str) -> &str {
-    module
-        .split_once("::")
-        .map(|(_, rest)| rest)
-        .unwrap_or(module)
+    module.split_once("::").map_or(module, |(_, rest)| rest)
 }
 
 fn suite_key(module: &str, explicit: Option<&str>) -> String {
-    explicit
-        .map(str::to_string)
-        .unwrap_or_else(|| relative_module(module).to_string())
+    explicit.map_or_else(|| relative_module(module).to_string(), str::to_string)
 }
 
 /// The harness id of a registered test, matching what rust-analyzer passes to
@@ -85,7 +80,7 @@ fn test_id(module: &str, fn_name: &str) -> String {
 pub fn collect() -> Result<Vec<Suite>> {
     let mut suites: BTreeMap<String, Suite> = BTreeMap::new();
 
-    for def in SUITES.iter() {
+    for def in SUITES {
         let key = suite_key(def.module, def.suite);
         if suites.contains_key(&key) {
             return Err(anyhow!(

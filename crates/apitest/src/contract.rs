@@ -1,6 +1,6 @@
-//! Contract pinning against OpenAPI documents.
+//! Contract pinning against `OpenAPI` documents.
 //!
-//! * [`Contract::pinned`] loads a checked-in spec (YAML or JSON, OpenAPI 3.0/3.1).
+//! * [`Contract::pinned`] loads a checked-in spec (YAML or JSON, `OpenAPI` 3.0/3.1).
 //! * Every `cx.call(contract, operationId)` validates the request body and the
 //!   response (status must be documented, body must match the schema).
 //! * The operations, parameters, request fields and statuses a suite actually
@@ -41,7 +41,7 @@ impl std::str::FromStr for Compat {
     }
 }
 
-/// A parsed OpenAPI document reduced to what matters for testing.
+/// A parsed `OpenAPI` document reduced to what matters for testing.
 #[derive(Debug, Clone)]
 pub struct Spec {
     pub title: String,
@@ -112,11 +112,10 @@ impl Spec {
                 .unwrap_or_default();
             for method in ["get", "put", "post", "delete", "patch", "head", "options"] {
                 let Some(op) = item.get(method) else { continue };
-                let id = op
-                    .get("operationId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("{} {path}", method.to_uppercase()));
+                let id = op.get("operationId").and_then(Value::as_str).map_or_else(
+                    || format!("{} {path}", method.to_uppercase()),
+                    str::to_string,
+                );
                 let mut params: Vec<Param> = vec![];
                 let own = op
                     .get("parameters")
@@ -190,6 +189,7 @@ impl Spec {
 
 impl Operation {
     /// Finds the response key that documents `status` (exact, then `2XX`, then `default`).
+    #[must_use]
     pub fn response_key(&self, status: u16) -> Option<&str> {
         let exact = status.to_string();
         let range = format!("{}XX", status / 100);
@@ -213,7 +213,7 @@ fn json_schema_of(v: &Value) -> Option<Value> {
         .and_then(|(_, m)| m.get("schema").cloned())
 }
 
-/// Inlines local `$ref`s and rewrites OpenAPI 3.0 `nullable` into JSON Schema.
+/// Inlines local `$ref`s and rewrites `OpenAPI` 3.0 `nullable` into JSON Schema.
 fn resolve(v: &Value, root: &Value, depth: usize) -> Value {
     if depth > 32 {
         return json!({}); // recursive schema; stop expanding
@@ -304,6 +304,7 @@ impl Contract {
 
     /// Pins an already loaded spec. [`Contract::spec_path`] stays empty, so the
     /// contract cannot be recorded in a lockfile relative to its file.
+    #[must_use]
     pub fn from_spec(name: &str, pinned: Spec) -> Contract {
         Contract {
             name: name.into(),
@@ -324,7 +325,7 @@ impl Contract {
         self
     }
 
-    /// Uses an in-process OpenAPI document as the live spec. With utoipa:
+    /// Uses an in-process `OpenAPI` document as the live spec. With utoipa:
     /// `.live_document(serde_json::to_value(ApiDoc::openapi())?)`.
     pub fn live_document(mut self, doc: Value) -> Self {
         self.live_spec = Some(LiveSpec::Document(doc));
@@ -545,6 +546,7 @@ pub struct DriftReport {
 }
 
 impl DriftReport {
+    #[must_use]
     pub fn is_breaking(&self) -> bool {
         self.findings
             .iter()
@@ -622,7 +624,7 @@ fn diff_operation(
                 "parameter removed",
             )),
             Some(lp) => {
-                compare_schema(&pp.schema, &lp.schema, Dir::Request, mode, id, &loc, out, 0)
+                compare_schema(&pp.schema, &lp.schema, Dir::Request, mode, id, &loc, out, 0);
             }
         }
     }
@@ -669,7 +671,7 @@ fn diff_operation(
                             id,
                             &loc,
                             "field we send is rejected by the live spec",
-                        ))
+                        ));
                     }
                     (_, None) => out.push(Finding::new(
                         Severity::Warning,
@@ -678,7 +680,7 @@ fn diff_operation(
                         "field we send is no longer documented (may be ignored)",
                     )),
                     (Some(ps), Some(ls)) => {
-                        compare_schema(ps, ls, Dir::Request, mode, id, &loc, out, 0)
+                        compare_schema(ps, ls, Dir::Request, mode, id, &loc, out, 0);
                     }
                     (None, Some(_)) => {}
                 }
@@ -689,7 +691,11 @@ fn diff_operation(
 
     // Responses.
     let statuses: Vec<String> = match used {
-        Some(u) if !u.statuses.is_empty() => u.statuses.iter().map(|s| s.to_string()).collect(),
+        Some(u) if !u.statuses.is_empty() => u
+            .statuses
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         _ => p
             .responses
             .keys()
@@ -720,7 +726,7 @@ fn diff_operation(
             (None, Some(_)) => {}
             (Some(pk), Some(lk)) => match (p.responses[&pk].as_ref(), l.responses[&lk].as_ref()) {
                 (Some(ps), Some(ls)) => {
-                    compare_schema(ps, ls, Dir::Response, mode, id, &loc, out, 0)
+                    compare_schema(ps, ls, Dir::Response, mode, id, &loc, out, 0);
                 }
                 (Some(_), None) => out.push(Finding::new(
                     Severity::Breaking,
@@ -753,7 +759,7 @@ fn diff_operation(
 fn list(values: &[&Value]) -> String {
     values
         .iter()
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -794,7 +800,7 @@ fn types(schema: &Value) -> BTreeSet<String> {
     t
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn compare_schema(
     p: &Value,
     l: &Value,

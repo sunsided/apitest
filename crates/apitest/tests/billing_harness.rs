@@ -1,8 +1,8 @@
 //! The billing suites (Rust, Rhai, JS) as regular `cargo test` tests.
 //!
-//! cargo test -p apitest --features full --test billing_harness
-//! cargo test -p apitest --features full --test billing_harness -- "create and fetch"
-//! APITEST_JUNIT=target/apitest/junit.xml cargo test -p apitest --features full --test billing_harness
+//! cargo test -p apitest --features full --test `billing_harness`
+//! cargo test -p apitest --features full --test `billing_harness` -- "create and fetch"
+//! `APITEST_JUNIT=target/apitest/junit.xml` cargo test -p apitest --features full --test `billing_harness`
 
 #[path = "support/demo_server.rs"]
 mod demo;

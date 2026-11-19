@@ -69,9 +69,7 @@ impl Default for RunConfig {
             update_lock: false,
             check_drift: true,
             only: vec![],
-            max_parallel: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4),
+            max_parallel: std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
             quiet: false,
             drift_cache: None,
             user_agent: default_user_agent(),
@@ -83,6 +81,7 @@ impl Default for RunConfig {
 }
 
 /// `apitest/<version>`.
+#[must_use]
 pub fn default_user_agent() -> String {
     concat!("apitest/", env!("CARGO_PKG_VERSION")).to_string()
 }
@@ -119,6 +118,7 @@ impl RunConfig {
     }
 
     /// Replaces the tracing configuration (e.g. `TracingConfig::disabled()`).
+    #[must_use]
     pub fn tracing(mut self, t: crate::trace::TracingConfig) -> Self {
         self.tracing = t;
         self
@@ -180,11 +180,13 @@ impl RunConfig {
         self
     }
 
+    #[must_use]
     pub fn update_lock(mut self, yes: bool) -> Self {
         self.update_lock = yes;
         self
     }
 
+    #[must_use]
     pub fn quiet(mut self, yes: bool) -> Self {
         self.quiet = yes;
         self
@@ -270,7 +272,7 @@ pub async fn check_drift(contracts: &[Arc<Contract>], cfg: &RunConfig) -> Result
                     .get(&url)
                     .send()
                     .await
-                    .and_then(|r| r.error_for_status())
+                    .and_then(reqwest::Response::error_for_status)
                     .with_context(|| {
                         format!("fetching live spec of contract '{}' from {url}", c.name)
                     })?;
@@ -320,7 +322,7 @@ fn drift_cache_key(
     h.update(format!("{:?}", c.mode).as_bytes());
     match live {
         LiveSpec::Url(u) => {
-            h.update(live_url(u, cfg.contract_url(c).unwrap_or(&cfg.base_url)).as_bytes())
+            h.update(live_url(u, cfg.contract_url(c).unwrap_or(&cfg.base_url)).as_bytes());
         }
         LiveSpec::Document(d) => h.update(d.to_string().as_bytes()),
     }
@@ -516,22 +518,19 @@ pub async fn run_suite(suite: &Suite, cfg: &RunConfig) -> SuiteReport {
     }
 
     // 3. Tests.
-    match setup {
-        Err(e) => {
-            report.setup_error = Some(e);
-            skip_all(&mut report, "suite setup failed");
-        }
-        Ok(()) => {
-            let vu = scx.child_vu(0);
-            match setup_fixtures(&suite, &vu, Scope::Vu).await {
-                Err(e) => {
-                    report.setup_error = Some(format!("{e:#}"));
-                    skip_all(&mut report, "vu setup failed");
-                }
-                Ok(()) => report.tests = schedule(&suite, &vu, &selected, cfg.max_parallel).await,
+    if let Err(e) = setup {
+        report.setup_error = Some(e);
+        skip_all(&mut report, "suite setup failed");
+    } else {
+        let vu = scx.child_vu(0);
+        match setup_fixtures(&suite, &vu, Scope::Vu).await {
+            Err(e) => {
+                report.setup_error = Some(format!("{e:#}"));
+                skip_all(&mut report, "vu setup failed");
             }
-            report.teardown_errors.extend(vu.unwind().await);
+            Ok(()) => report.tests = schedule(&suite, &vu, &selected, cfg.max_parallel).await,
         }
+        report.teardown_errors.extend(vu.unwind().await);
     }
 
     // 4. Suite teardown (always).

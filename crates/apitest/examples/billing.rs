@@ -1,5 +1,5 @@
 //! apitest as a library: spin up the app in-process (real TCP), run suites
-//! written in Rust, Rhai and JS against it, write a JUnit report.
+//! written in Rust, Rhai and JS against it, write a `JUnit` report.
 //!
 //! cargo run -p apitest --features full --example billing            # against the pinned version
 //! cargo run -p apitest --features full --example billing -- 1.1     # compatible change
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     std::fs::write(&out, junit_xml(&reports))?;
     println!("JUnit report: {}", out.display());
     server.shutdown().await?;
-    if reports.iter().all(|r| r.passed()) {
+    if reports.iter().all(apitest::SuiteReport::passed) {
         Ok(())
     } else {
         std::process::exit(1)

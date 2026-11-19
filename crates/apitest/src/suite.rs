@@ -81,12 +81,14 @@ pub struct TestOpts {
 }
 
 impl TestOpts {
+    #[must_use]
     pub fn parallel() -> Self {
         TestOpts {
             concurrency: Concurrency::Parallel,
             ..Default::default()
         }
     }
+    #[must_use]
     pub fn serial() -> Self {
         TestOpts::default()
     }
@@ -94,6 +96,7 @@ impl TestOpts {
         self.resources.push(name.into());
         self
     }
+    #[must_use]
     pub fn timeout(mut self, t: std::time::Duration) -> Self {
         self.timeout = Some(t);
         self
@@ -210,12 +213,14 @@ impl Suite {
     }
 
     /// Tracing settings for this suite only.
+    #[must_use]
     pub fn tracing(mut self, t: crate::trace::TracingConfig) -> Self {
         self.tracing = Some(t);
         self
     }
 
     /// No trace headers from this suite.
+    #[must_use]
     pub fn no_tracing(self) -> Self {
         self.tracing(crate::trace::TracingConfig::disabled())
     }
@@ -378,6 +383,7 @@ impl Suite {
     }
 
     /// The id the harness reports this test under.
+    #[must_use]
     pub fn test_id(&self, t: &TestCase) -> String {
         t.id.clone()
             .unwrap_or_else(|| format!("{}::{}", self.name, t.name))

@@ -136,7 +136,7 @@ impl PyResponse {
     }
 }
 
-#[allow(non_snake_case)]
+#[expect(non_snake_case)]
 fn PyAssertionError(msg: String) -> PyErr {
     pyo3::exceptions::PyAssertionError::new_err(msg)
 }
@@ -183,10 +183,10 @@ impl PyCtx {
     }
     /// Default header for every request from this scope and below.
     fn header(&self, name: &str, value: &str) {
-        self.sync.header(name, value)
+        self.sync.header(name, value);
     }
     fn log(&self, msg: &str) {
-        self.sync.log(msg)
+        self.sync.log(msg);
     }
     fn vu(&self) -> Option<usize> {
         self.sync.vu()
@@ -197,10 +197,10 @@ impl PyCtx {
     }
     /// `Authorization: Bearer <token>` for the rest of this scope.
     fn bearer(&self, token: &str) {
-        self.sync.bearer(token)
+        self.sync.bearer(token);
     }
     fn basic(&self, username: &str, password: &str) {
-        self.sync.basic(username, password)
+        self.sync.basic(username, password);
     }
     /// Any credentials for this scope, e.g. `{"type": "login", "service": "hub", "username": ..., "password": ...}`.
     fn auth(&self, py: Python<'_>, auth: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -293,7 +293,7 @@ fn runtime() -> PyResult<tokio::runtime::Runtime> {
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn make_config(
     py: Python<'_>,
     base_url: String,
@@ -318,12 +318,8 @@ fn make_config(
         && let Value::Object(m) = to_json(py, v.as_any())?
     {
         for (k, v) in m {
-            cfg.vars.insert(
-                k,
-                v.as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| v.to_string()),
-            );
+            cfg.vars
+                .insert(k, v.as_str().map_or_else(|| v.to_string(), str::to_string));
         }
     }
     Ok(cfg)
@@ -391,7 +387,7 @@ impl PySuite {
         Ok(())
     }
 
-    /// kind: before_all | after_all | before_each | after_each
+    /// kind: `before_all` | `after_all` | `before_each` | `after_each`
     fn add_hook(&self, kind: &str, f: Py<PyAny>) -> PyResult<()> {
         let kind: HookKind = kind.parse().map_err(rt_err)?;
         self.inner.lock().unwrap().add_hook(kind, py_unit_fn(f));
@@ -399,7 +395,7 @@ impl PySuite {
     }
 
     #[pyo3(signature = (name, body, parallel=false, resources=None, timeout_ms=None, setup=None, teardown=None, tags=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn add_test(
         &self,
         name: &str,
@@ -429,7 +425,7 @@ impl PySuite {
 
     /// Runs the suite and returns the report as a dict (`report["passed"]`).
     #[pyo3(signature = (base_url, vars=None, lockfile=None, update_lock=false, check_drift=true, only=None, max_parallel=None, junit=None, quiet=false))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn run<'py>(
         &self,
         py: Python<'py>,
@@ -472,7 +468,7 @@ impl PySuite {
     /// Runs one test as a load scenario.
     /// Either `duration` ("10s"), `iterations` (shared budget) or `stages` ([("10s", 20), ("5s", 0)]).
     #[pyo3(signature = (test, base_url, vus=10, duration="10s".to_string(), iterations=None, stages=None, thresholds=None, vars=None, validate_every=100))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn load<'py>(
         &self,
         py: Python<'py>,

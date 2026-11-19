@@ -66,11 +66,13 @@ impl TestServer {
         .await
     }
 
+    #[must_use]
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
     /// `http://127.0.0.1:<port>`; use as [`crate::RunConfig::base_url`].
+    #[must_use]
     pub fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }

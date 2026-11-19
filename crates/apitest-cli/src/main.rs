@@ -34,7 +34,7 @@ struct Common {
     /// Base URL for relative request paths.
     #[arg(long, short = 'u')]
     base_url: Option<String>,
-    /// Variable for cx.env(), e.g. --var API_USER=demo (repeatable).
+    /// Variable for `cx.env()`, e.g. --var `API_USER=demo` (repeatable).
     #[arg(long = "var", value_parser = parse_kv)]
     vars: Vec<(String, String)>,
     /// Lockfile path (default from config, else apitest.lock.nova next to the config).
@@ -43,7 +43,7 @@ struct Common {
     /// Do not fail when the live spec is incompatible with the pinned one.
     #[arg(long)]
     no_drift_check: bool,
-    /// Suppress cx.log() output.
+    /// Suppress `cx.log()` output.
     #[arg(long, short = 'q')]
     quiet: bool,
     /// User-Agent for every request (default: apitest/<version>).
@@ -68,7 +68,7 @@ enum Cmd {
         /// Only run tests whose name contains this (repeatable).
         #[arg(long)]
         only: Vec<String>,
-        /// Write a JUnit XML report.
+        /// Write a `JUnit` XML report.
         #[arg(long)]
         junit: Option<PathBuf>,
         /// Write a JSON report.
@@ -264,7 +264,7 @@ async fn run(cli: Cli) -> Result<bool> {
             if update_lock && let Some(l) = &cfg.lockfile {
                 eprintln!("updated {}", l.display());
             }
-            Ok(reports.iter().all(|r| r.passed()))
+            Ok(reports.iter().all(apitest::SuiteReport::passed))
         }
         Cmd::Load {
             file,

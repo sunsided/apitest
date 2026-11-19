@@ -7,7 +7,7 @@ use apitest::trace::Traceparent;
 use proptest::prelude::*;
 use serde_json::{Map, Value, json};
 
-/// Builds an OpenAPI document with one `GET` operation per entry, each returning an object
+/// Builds an `OpenAPI` document with one `GET` operation per entry, each returning an object
 /// with the given property names (all `string`, all required).
 fn openapi(ops: &[(String, Vec<String>)]) -> Value {
     let paths: Map<String, Value> = ops

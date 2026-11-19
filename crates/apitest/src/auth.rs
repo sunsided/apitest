@@ -195,6 +195,7 @@ impl Default for LoginFlow {
 
 impl LoginFlow {
     /// Login through a contract operation.
+    #[must_use]
     pub fn operation(op: &str) -> Self {
         LoginFlow {
             operation: Some(op.into()),
@@ -202,6 +203,7 @@ impl LoginFlow {
         }
     }
     /// Login through a raw `POST` path.
+    #[must_use]
     pub fn path(path: &str) -> Self {
         LoginFlow {
             operation: None,
@@ -210,18 +212,22 @@ impl LoginFlow {
         }
     }
     /// Body template; `"{username}"` / `"{password}"` are substituted.
+    #[must_use]
     pub fn body(mut self, body: Value) -> Self {
         self.body = body;
         self
     }
+    #[must_use]
     pub fn form(mut self) -> Self {
         self.form = true;
         self
     }
+    #[must_use]
     pub fn token_at(mut self, pointer: &str) -> Self {
         self.token = pointer.into();
         self
     }
+    #[must_use]
     pub fn expires_at(mut self, pointer: &str) -> Self {
         self.expires_in = Some(pointer.into());
         self
@@ -270,7 +276,7 @@ pub(crate) fn base64(input: &[u8]) -> String {
             *chunk.get(1).unwrap_or(&0),
             *chunk.get(2).unwrap_or(&0),
         ];
-        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
         for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
             if i <= chunk.len() {
                 out.push(T[(n >> shift & 63) as usize] as char);
@@ -449,9 +455,7 @@ async fn login(
                     .map(|(k, v)| {
                         (
                             k.clone(),
-                            v.as_str()
-                                .map(str::to_string)
-                                .unwrap_or_else(|| v.to_string()),
+                            v.as_str().map_or_else(|| v.to_string(), str::to_string),
                         )
                     })
                     .collect()

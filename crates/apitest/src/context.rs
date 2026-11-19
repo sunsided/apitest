@@ -158,16 +158,19 @@ impl Ctx {
     }
 
     /// The scope this context belongs to.
+    #[must_use]
     pub fn scope(&self) -> Scope {
         self.frame.scope
     }
 
     /// Name of the current frame (suite name, `vu-3`, test name, ...).
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.frame.name
     }
 
     /// Path like `billing/vu-0/create invoice`.
+    #[must_use]
     pub fn path(&self) -> String {
         let mut parts = vec![];
         let mut f = Some(&self.frame);
@@ -182,6 +185,7 @@ impl Ctx {
     }
 
     /// Virtual user index, if running inside a VU (always `Some(0)` in functional runs).
+    #[must_use]
     pub fn vu(&self) -> Option<usize> {
         self.frame.vu
     }
@@ -192,6 +196,7 @@ impl Ctx {
     }
 
     /// The run configuration.
+    #[must_use]
     pub fn config(&self) -> &RunConfig {
         &self.shared.config
     }
@@ -201,6 +206,7 @@ impl Ctx {
     /// With the default [`crate::trace::TraceScope::Test`] this is the same for every
     /// request of one test, and different between tests. With `TraceScope::Request`
     /// every request starts its own trace; use `resp.trace` there.
+    #[must_use]
     pub fn trace(&self) -> crate::trace::TraceContext {
         use crate::trace::{TraceContext, TraceScope};
         let cfg = &self.shared.config.tracing;
@@ -250,6 +256,7 @@ impl Ctx {
     }
 
     /// The nearest scope auth, if any.
+    #[must_use]
     pub fn scope_auth(&self) -> Option<crate::auth::Auth> {
         let mut f = Some(&self.frame);
         while let Some(frame) = f {
@@ -262,6 +269,7 @@ impl Ctx {
     }
 
     /// Name of the nearest frame of `scope` (suite name, test name, ...).
+    #[must_use]
     pub fn name_of(&self, scope: Scope) -> Option<String> {
         let mut f = Some(&self.frame);
         while let Some(frame) = f {
@@ -274,6 +282,7 @@ impl Ctx {
     }
 
     /// Looks up a value (usually a fixture) in this scope or any parent scope.
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<Value> {
         let mut f = Some(&self.frame);
         while let Some(frame) = f {
@@ -308,6 +317,7 @@ impl Ctx {
     }
 
     /// Like [`Ctx::env`] but optional.
+    #[must_use]
     pub fn env_opt(&self, key: &str) -> Option<String> {
         self.shared
             .config
@@ -459,7 +469,7 @@ where
             let payload = join.into_panic();
             let msg = payload
                 .downcast_ref::<&str>()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string panic>".into());
             Err(anyhow!("panicked: {msg}"))

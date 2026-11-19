@@ -58,6 +58,7 @@ pub struct Actor {
 
 impl Actor {
     /// An anonymous actor on a service.
+    #[must_use]
     pub fn on(service: &str) -> Actor {
         Actor {
             service: Some(service.to_string()),
@@ -66,6 +67,7 @@ impl Actor {
     }
 
     /// An actor with no service: only absolute URLs (see also [`visit`]).
+    #[must_use]
     pub fn anywhere() -> Actor {
         Actor::default()
     }
@@ -76,6 +78,7 @@ impl Actor {
     }
 
     /// Uses a different contract than the service name for `call`.
+    #[must_use]
     pub fn contract(mut self, name: &str) -> Actor {
         self.contract = Some(name.to_string());
         self
@@ -120,10 +123,12 @@ impl Actor {
     }
 
     /// OAuth 2.0 client credentials, cached until shortly before they expire.
+    #[must_use]
     pub fn client_credentials(self, creds: crate::auth::ClientCredentials) -> Actor {
         self.auth(crate::auth::Auth::ClientCredentials(creds))
     }
 
+    #[must_use]
     pub fn auth(mut self, auth: crate::auth::Auth) -> Actor {
         self.auth = auth;
         self
@@ -190,6 +195,7 @@ impl Actor {
     }
 
     /// The bearer token, if this actor has a static one.
+    #[must_use]
     pub fn token(&self) -> Option<&str> {
         match &self.auth {
             crate::auth::Auth::Bearer { token } => Some(token),
@@ -293,7 +299,7 @@ where
 }
 
 /// Runs a named step: it is logged, timed, listed in the report (with ✓/✗ for
-/// failed tests and in JUnit `system-out`), and its name is added to the error.
+/// failed tests and in `JUnit` `system-out`), and its name is added to the error.
 /// Accepts any future or request: `step("…", async { … })`, `step("…", req.expect(201))`.
 pub fn step<T, F>(name: impl Into<String>, work: F) -> impl Future<Output = Result<T>>
 where
@@ -331,6 +337,7 @@ pub struct Retry {
 }
 
 impl Retry {
+    #[must_use]
     pub fn new(timeout: Duration) -> Self {
         Retry {
             started: Instant::now(),
@@ -421,7 +428,7 @@ fn run_tag() -> &'static str {
             .unwrap_or_default();
         format!(
             "{:x}",
-            (nanos ^ ((std::process::id() as u128) << 64)) & 0xff_ffff
+            (nanos ^ (u128::from(std::process::id()) << 64)) & 0xff_ffff
         )
     })
 }
@@ -436,11 +443,13 @@ pub fn unique(prefix: &str) -> String {
 }
 
 /// A unique e-mail address on the reserved `.test` TLD.
+#[must_use]
 pub fn unique_email(prefix: &str) -> String {
     format!("{}@example.test", unique(prefix))
 }
 
 /// All `http(s)://` links in a text (plain text, HTML or JSON-escaped).
+#[must_use]
 pub fn links(text: &str) -> Vec<String> {
     let mut out = vec![];
     let mut rest = text;

@@ -116,6 +116,7 @@ impl Default for TracingConfig {
 }
 
 impl TracingConfig {
+    #[must_use]
     pub fn disabled() -> Self {
         TracingConfig {
             enabled: false,
@@ -128,6 +129,7 @@ impl TracingConfig {
         self
     }
 
+    #[must_use]
     pub fn scope(mut self, scope: TraceScope) -> Self {
         self.scope = scope;
         self
@@ -176,6 +178,7 @@ pub struct SpanContext {
 
 impl SpanContext {
     /// The W3C `traceparent` value of this span.
+    #[must_use]
     pub fn traceparent(&self) -> String {
         format!(
             "00-{}-{}-{}",
@@ -196,6 +199,7 @@ pub struct Traceparent {
 }
 
 impl Traceparent {
+    #[must_use]
     pub fn sampled(&self) -> bool {
         self.flags & 1 == 1
     }
@@ -259,8 +263,7 @@ fn random_u64() -> u64 {
 pub(crate) fn new_trace_id() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(1);
+        .map_or(1, |d| d.as_secs() as u32);
     format!("{secs:08x}{:08x}{:016x}", random_u64() as u32, random_u64())
 }
 
@@ -303,7 +306,7 @@ fn baggage_escape(s: &str) -> String {
     for b in s.bytes() {
         match b {
             b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
-                o.push(b as char)
+                o.push(b as char);
             }
             _ => o.push_str(&format!("%{b:02X}")),
         }

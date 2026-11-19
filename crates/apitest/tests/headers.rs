@@ -477,7 +477,7 @@ async fn lazy_login_is_cached_single_flight_and_retried_on_401() {
     assert_eq!(stats(&srv).await["logins"], 2);
 }
 
-/// Minimal join_all without pulling in the futures crate.
+/// Minimal `join_all` without pulling in the futures crate.
 async fn futures_join<F: std::future::IntoFuture>(fs: impl IntoIterator<Item = F>) -> Vec<F::Output>
 where
     F::IntoFuture: Send + 'static,

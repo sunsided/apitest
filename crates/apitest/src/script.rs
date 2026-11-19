@@ -28,6 +28,7 @@ pub struct SyncCtx {
 
 impl SyncCtx {
     /// Must be called from inside the tokio runtime (it captures the current handle).
+    #[must_use]
     pub fn new(cx: Ctx) -> Self {
         SyncCtx {
             cx,
@@ -39,6 +40,7 @@ impl SyncCtx {
         self.rt.block_on(f)
     }
 
+    #[must_use]
     pub fn get(&self, key: &str) -> Value {
         self.cx.get(key).unwrap_or(Value::Null)
     }
@@ -51,34 +53,37 @@ impl SyncCtx {
         self.cx.env(key)
     }
 
+    #[must_use]
     pub fn env_opt(&self, key: &str) -> Option<String> {
         self.cx.env_opt(key)
     }
 
     pub fn header(&self, name: &str, value: &str) {
-        self.cx.default_header(name, value)
+        self.cx.default_header(name, value);
     }
 
     pub fn log(&self, msg: &str) {
-        self.cx.log(msg)
+        self.cx.log(msg);
     }
 
+    #[must_use]
     pub fn vu(&self) -> Option<usize> {
         self.cx.vu()
     }
 
     /// The current test's trace context as a value (`trace_id`, `sampled`, ...).
+    #[must_use]
     pub fn trace(&self) -> Value {
         serde_json::to_value(self.cx.trace()).unwrap_or(Value::Null)
     }
 
     /// `Authorization: Bearer <token>` for the rest of the current scope.
     pub fn bearer(&self, token: &str) {
-        self.cx.bearer(token)
+        self.cx.bearer(token);
     }
 
     pub fn basic(&self, username: &str, password: &str) {
-        self.cx.basic(username, password)
+        self.cx.basic(username, password);
     }
 
     /// Scope auth from a value (`{ type: "login", service, username, password }`, ...).
@@ -143,7 +148,7 @@ impl Default for LoadOptions {
 }
 
 /// Loads suites from a script file, picking the frontend by extension.
-#[allow(unused_variables)]
+#[expect(unused_variables)]
 pub fn load_suites(path: &Path, opts: &LoadOptions) -> Result<Vec<Suite>> {
     match path.extension().and_then(|e| e.to_str()) {
         #[cfg(feature = "rhai")]

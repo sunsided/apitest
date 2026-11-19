@@ -1,4 +1,4 @@
-//! Run results, console output and standard report formats (JUnit XML, JSON).
+//! Run results, console output and standard report formats (`JUnit` XML, JSON).
 
 use std::fmt::Write as _;
 
@@ -38,6 +38,7 @@ pub struct TestReport {
 
 impl TestReport {
     /// `✓ step [12 ms]` lines, for failure messages.
+    #[must_use]
     pub fn step_trail(&self) -> String {
         self.steps
             .iter()
@@ -53,6 +54,7 @@ impl TestReport {
             .join("\n")
     }
 
+    #[must_use]
     pub fn passed(&self) -> bool {
         self.outcome == Outcome::Passed && self.teardown_errors.is_empty()
     }
@@ -62,9 +64,9 @@ impl TestReport {
 pub struct SuiteReport {
     pub suite: String,
     pub tests: Vec<TestReport>,
-    /// Suite-level setup failure (drift, suite fixture, before_all).
+    /// Suite-level setup failure (drift, suite fixture, `before_all`).
     pub setup_error: Option<String>,
-    /// Suite-level teardown failures (after_all, suite/vu cleanups).
+    /// Suite-level teardown failures (`after_all`, suite/vu cleanups).
     pub teardown_errors: Vec<String>,
     pub drift: Vec<DriftReport>,
     pub duration_ms: f64,
@@ -80,11 +82,15 @@ impl SuiteReport {
     /// Panics with a readable summary unless everything passed. Handy in `#[tokio::test]`.
     #[track_caller]
     pub fn assert_passed(&self) {
-        if !self.passed() {
-            panic!("suite '{}' failed:\n{}", self.suite, self.render());
-        }
+        assert!(
+            self.passed(),
+            "suite '{}' failed:\n{}",
+            self.suite,
+            self.render()
+        );
     }
 
+    #[must_use]
     pub fn counts(&self) -> (usize, usize, usize) {
         let mut c = (0, 0, 0);
         for t in &self.tests {
@@ -98,6 +104,7 @@ impl SuiteReport {
     }
 
     /// Human-readable summary.
+    #[must_use]
     pub fn render(&self) -> String {
         let mut s = String::new();
         let _ = writeln!(s, "suite {}", self.suite);
@@ -164,12 +171,13 @@ impl SuiteReport {
     }
 }
 
-/// Renders suites as a JUnit XML document (`<testsuites>`), the de-facto standard
+/// Renders suites as a `JUnit` XML document (`<testsuites>`), the de-facto standard
 /// understood by GitHub Actions, GitLab, Jenkins, Azure DevOps, IDEs, ...
 ///
 /// Contract drift checks appear as `[contract] <name>` test cases, suite-level
 /// setup and teardown failures as `[setup]` / `[teardown]` cases, so they show
 /// up in CI dashboards like any other failure.
+#[must_use]
 pub fn junit_xml(suites: &[SuiteReport]) -> String {
     let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     let mut all_cases = vec![];

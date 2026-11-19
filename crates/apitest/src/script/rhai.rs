@@ -93,57 +93,57 @@ fn build_engine() -> Engine {
             ..Default::default()
         })
         .register_fn("contract", |s: &mut RSuite, name: &str, path: &str| {
-            s.contracts.push((name.into(), path.into(), Map::new()))
+            s.contracts.push((name.into(), path.into(), Map::new()));
         })
         .register_fn(
             "contract",
             |s: &mut RSuite, name: &str, path: &str, opts: Map| {
-                s.contracts.push((name.into(), path.into(), opts))
+                s.contracts.push((name.into(), path.into(), opts));
             },
         )
         .register_fn(
             "fixture",
             |s: &mut RSuite, name: &str, scope: &str, f: FnPtr| {
-                s.fixtures.push((name.into(), scope.into(), f, None))
+                s.fixtures.push((name.into(), scope.into(), f, None));
             },
         )
         .register_fn(
             "fixture",
             |s: &mut RSuite, name: &str, scope: &str, f: FnPtr, td: FnPtr| {
-                s.fixtures.push((name.into(), scope.into(), f, Some(td)))
+                s.fixtures.push((name.into(), scope.into(), f, Some(td)));
             },
         )
         .register_fn("setup", |s: &mut RSuite, f: FnPtr| {
-            s.hooks.push((HookKind::BeforeAll, f))
+            s.hooks.push((HookKind::BeforeAll, f));
         })
         .register_fn("teardown", |s: &mut RSuite, f: FnPtr| {
-            s.hooks.push((HookKind::AfterAll, f))
+            s.hooks.push((HookKind::AfterAll, f));
         })
         .register_fn("before_all", |s: &mut RSuite, f: FnPtr| {
-            s.hooks.push((HookKind::BeforeAll, f))
+            s.hooks.push((HookKind::BeforeAll, f));
         })
         .register_fn("after_all", |s: &mut RSuite, f: FnPtr| {
-            s.hooks.push((HookKind::AfterAll, f))
+            s.hooks.push((HookKind::AfterAll, f));
         })
         .register_fn("before_each", |s: &mut RSuite, f: FnPtr| {
-            s.hooks.push((HookKind::BeforeEach, f))
+            s.hooks.push((HookKind::BeforeEach, f));
         })
         .register_fn("after_each", |s: &mut RSuite, f: FnPtr| {
-            s.hooks.push((HookKind::AfterEach, f))
+            s.hooks.push((HookKind::AfterEach, f));
         })
         .register_fn("test", |s: &mut RSuite, name: &str, f: FnPtr| {
             s.tests.push(RTestDef {
                 name: name.into(),
                 body: Some(f),
                 opts: Map::new(),
-            })
+            });
         })
         .register_fn("test", |s: &mut RSuite, name: &str, opts: Map, f: FnPtr| {
             s.tests.push(RTestDef {
                 name: name.into(),
                 body: Some(f),
                 opts,
-            })
+            });
         });
 
     // --- cx ---
@@ -160,22 +160,20 @@ fn build_engine() -> Engine {
             cx.sync.env_opt(k).unwrap_or_else(|| default.to_string())
         })
         .register_fn("header", |cx: &mut RCx, k: &str, v: &str| {
-            cx.sync.header(k, v)
+            cx.sync.header(k, v);
         })
         .register_fn("log", |cx: &mut RCx, m: Dynamic| {
-            cx.sync.log(&m.to_string())
+            cx.sync.log(&m.to_string());
         })
         .register_fn("trace", |cx: &mut RCx| to_dyn(&cx.sync.trace()))
         .register_fn("bearer", |cx: &mut RCx, t: &str| cx.sync.bearer(t))
         .register_fn("basic", |cx: &mut RCx, u: &str, p: &str| {
-            cx.sync.basic(u, p)
+            cx.sync.basic(u, p);
         })
         .register_fn("auth", |cx: &mut RCx, a: Map| -> RResult<()> {
             cx.sync.auth(from_dyn(&Dynamic::from_map(a))?).map_err(err)
         })
-        .register_fn("vu", |cx: &mut RCx| {
-            cx.sync.vu().map(|v| v as i64).unwrap_or(-1)
-        })
+        .register_fn("vu", |cx: &mut RCx| cx.sync.vu().map_or(-1, |v| v as i64))
         .register_fn(
             "http",
             |cx: &mut RCx, m: &str, p: &str| -> RResult<Dynamic> {
@@ -215,7 +213,10 @@ fn build_engine() -> Engine {
         .register_fn("expect", |r: &mut Map, status: i64| -> RResult<Map> {
             let got = r.get("status").and_then(|s| s.as_int().ok()).unwrap_or(-1);
             if got != status {
-                let text = r.get("text").map(|t| t.to_string()).unwrap_or_default();
+                let text = r
+                    .get("text")
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default();
                 return Err(format!(
                     "expected status {status}, got {got}: {}",
                     truncate(&text, 300)
@@ -350,10 +351,13 @@ fn convert(d: RSuite, rt: &Arc<Runtime>, base: &Path) -> Result<Suite> {
     for t in d.tests {
         let mut opts = TestOpts::default();
         let mut o = t.opts;
-        if let Some(f) = o.remove("setup").and_then(|v| v.try_cast::<FnPtr>()) {
+        if let Some(f) = o.remove("setup").and_then(rhai::Dynamic::try_cast::<FnPtr>) {
             opts.setup = Some(callback(rt, f));
         }
-        if let Some(f) = o.remove("teardown").and_then(|v| v.try_cast::<FnPtr>()) {
+        if let Some(f) = o
+            .remove("teardown")
+            .and_then(rhai::Dynamic::try_cast::<FnPtr>)
+        {
             opts.teardown = Some(callback(rt, f));
         }
         let rest = from_dyn(&Dynamic::from_map(o))
@@ -373,7 +377,7 @@ pub(crate) fn apply_opts(opts: &mut TestOpts, v: &Value) -> Result<()> {
     super::apply_test_opts(opts, v)
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn _assert_send_sync() {
     fn is<T: Send + Sync>() {}
     is::<Runtime>();

@@ -11,7 +11,7 @@
 //!
 //! Everything created along the way is rolled back in reverse order.
 //!
-//! cargo test -p apitest --features full --test care_flow
+//! cargo test -p apitest --features full --test `care_flow`
 
 #[path = "support/care.rs"]
 mod care;
@@ -38,7 +38,7 @@ mod onboarding {
     }
 
     /// The pre-existing Hub admin: a named actor from the run config
-    /// (`actors:` in apitest.nova), logging in lazily with ${HUB_ADMIN_EMAIL} / ${HUB_ADMIN_PASSWORD}.
+    /// (`actors:` in apitest.nova), logging in lazily with ${`HUB_ADMIN_EMAIL`} / ${`HUB_ADMIN_PASSWORD`}.
     #[apitest::fixture(scope = "suite")]
     async fn hub_admin() -> Result<Actor> {
         actor("hub_admin")

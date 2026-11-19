@@ -252,6 +252,7 @@ pub struct Scenario {
 }
 
 impl Scenario {
+    #[must_use]
     pub fn new(test: &str, executor: Executor) -> Self {
         Scenario {
             name: test.to_string(),
@@ -275,6 +276,7 @@ pub struct LoadPlan {
 }
 
 impl LoadPlan {
+    #[must_use]
     pub fn new(suite: Suite) -> Self {
         LoadPlan {
             suite,
@@ -283,6 +285,7 @@ impl LoadPlan {
         }
     }
 
+    #[must_use]
     pub fn scenario(mut self, s: Scenario) -> Self {
         self.scenarios.push(s);
         self
@@ -294,6 +297,7 @@ impl LoadPlan {
     }
 
     /// Largest VU count across scenarios (size JS worker pools with this).
+    #[must_use]
     pub fn max_vus(&self) -> usize {
         self.scenarios
             .iter()
@@ -331,6 +335,7 @@ pub struct LoadReport {
 }
 
 impl LoadReport {
+    #[must_use]
     pub fn passed(&self) -> bool {
         self.setup_error.is_none()
             && self.teardown_errors.is_empty()
@@ -340,6 +345,7 @@ impl LoadReport {
                 .all(|s| s.thresholds.iter().all(|t| t.passed))
     }
 
+    #[must_use]
     pub fn render(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
@@ -605,7 +611,7 @@ async fn run_scenario(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn vu_loop(
     suite: Arc<Suite>,
     parent: Ctx,

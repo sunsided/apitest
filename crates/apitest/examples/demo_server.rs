@@ -1,6 +1,6 @@
 //! Runs the demo billing service standalone, for the CLI and the Python bindings.
 //!
-//! cargo run -p apitest --example demo_server -- [port] [1.0|1.1|2.0]
+//! cargo run -p apitest --example `demo_server` -- [port] [1.0|1.1|2.0]
 
 #[path = "../tests/support/demo_server.rs"]
 mod demo;

@@ -57,7 +57,7 @@ fn parse_args(attr: TokenStream, allowed: &[&str]) -> syn::Result<Args> {
         let key = meta
             .path
             .get_ident()
-            .map(|i| i.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         if !allowed.contains(&key.as_str()) {
             return Err(meta.error(format!(
@@ -93,9 +93,10 @@ fn parse_args(attr: TokenStream, allowed: &[&str]) -> syn::Result<Args> {
 }
 
 fn opt_str(s: &Option<String>) -> TokenStream2 {
-    match s {
-        Some(v) => quote!(::core::option::Option::Some(#v)),
-        None => quote!(::core::option::Option::None),
+    if let Some(v) = s {
+        quote!(::core::option::Option::Some(#v))
+    } else {
+        quote!(::core::option::Option::None)
     }
 }
 
@@ -252,9 +253,10 @@ fn expand_test(attr: TokenStream, f: &ItemFn) -> syn::Result<TokenStream2> {
     };
     let resources = &a.resources;
     let tags = &a.tags;
-    let timeout = match a.timeout_ms {
-        Some(ms) => quote!(::core::option::Option::Some(::std::time::Duration::from_millis(#ms))),
-        None => quote!(::core::option::Option::None),
+    let timeout = if let Some(ms) = a.timeout_ms {
+        quote!(::core::option::Option::Some(::std::time::Duration::from_millis(#ms)))
+    } else {
+        quote!(::core::option::Option::None)
     };
     let (name, suite) = (opt_str(&a.name), opt_str(&a.suite));
     Ok(quote! {

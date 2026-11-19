@@ -26,7 +26,7 @@
 //! setup/teardown failures show up as `suite::[contract] name`, `suite::[setup]`
 //! and `suite::[teardown]`. Filters (`cargo test create`) are applied *before*
 //! running, so suite fixtures still run exactly once. Set `APITEST_JUNIT=path`
-//! to also write a JUnit XML report.
+//! to also write a `JUnit` XML report.
 //!
 //! ## nextest
 //!
@@ -64,6 +64,7 @@ type Finally =
     Box<dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>;
 
 impl Plan {
+    #[must_use]
     pub fn new(config: RunConfig) -> Self {
         Plan {
             config,
@@ -73,6 +74,7 @@ impl Plan {
         }
     }
 
+    #[must_use]
     pub fn suite(mut self, s: Suite) -> Self {
         self.suites.push(s);
         self
@@ -348,11 +350,11 @@ fn folded_trials(reports: Vec<SuiteReport>) -> Vec<Trial> {
             let trail = t.step_trail();
             match t.outcome {
                 Outcome::Failed { message } if !t.steps.is_empty() => {
-                    problems.insert(0, format!("steps:\n{trail}\n\n{message}"))
+                    problems.insert(0, format!("steps:\n{trail}\n\n{message}"));
                 }
                 Outcome::Failed { message } => problems.insert(0, message),
                 Outcome::Skipped { reason } if suite_problems.is_empty() => {
-                    problems.push(format!("skipped: {reason}"))
+                    problems.push(format!("skipped: {reason}"));
                 }
                 _ => {}
             }
@@ -379,7 +381,7 @@ mod xlock {
     use std::path::Path;
 
     /// Dropping the files releases the locks.
-    pub struct Held(#[allow(dead_code)] Vec<File>);
+    pub struct Held(#[expect(dead_code)] Vec<File>);
 
     fn open(path: &Path) -> std::io::Result<File> {
         OpenOptions::new()
