@@ -1,7 +1,8 @@
 //! Property tests for the parsers and the drift diff.
 
 use apitest::Contract;
-use apitest::contract::{Severity, Spec};
+use apitest::RunConfig;
+use apitest::contract::{ALL, DriftTarget, LIVE, Severity, Spec, SpecSource};
 use apitest::load::{Threshold, parse_duration, parse_quantity};
 use apitest::trace::Traceparent;
 use proptest::prelude::*;
@@ -132,5 +133,54 @@ proptest! {
         let expr = format!("{group}.p95 {op} {n}ms");
 
         prop_assert!(Threshold::parse(&expr).is_ok(), "{expr}");
+    }
+
+    /// A spec reference never panics: an `http(s)://` prefix in any case makes a URL,
+    /// kept as given apart from surrounding whitespace; anything else is a file under
+    /// the root (or absolute).
+    #[test]
+    fn spec_sources_are_urls_or_files(
+        scheme in prop::sample::select(vec!["", "http://", "https://", "HTTPS://", "Http://", "ftp://", "http:/"]),
+        rest in "\\PC{0,20}",
+    ) {
+        let raw = format!(" {scheme}{rest} ");
+        let lower = raw.trim().to_ascii_lowercase();
+        let is_url = lower.starts_with("http://") || lower.starts_with("https://");
+
+        match SpecSource::parse(&raw, std::path::Path::new("/root")) {
+            SpecSource::Url(u) => {
+                prop_assert!(is_url, "{raw:?} became URL {u:?}");
+                prop_assert_eq!(u, raw.trim());
+            }
+            SpecSource::File(p) => {
+                prop_assert!(!is_url, "{raw:?} became file {p:?}");
+                prop_assert!(p.is_absolute(), "{p:?}");
+            }
+            SpecSource::Document(_) => prop_assert!(false, "parsed into a document"),
+        }
+    }
+
+    /// The selection never repeats a target, only names known targets, and with
+    /// `all` covers `live` and every named target.
+    #[test]
+    fn drift_selection_is_unique_and_complete(
+        names in prop::collection::btree_set("[a-z]{1,4}", 0..4),
+        picks in prop::collection::vec(any::<prop::sample::Index>(), 0..8),
+    ) {
+        let names: Vec<String> = names.into_iter().filter(|n| n != LIVE && n != ALL).collect();
+        let pool: Vec<String> = names.iter().cloned().chain([LIVE.into(), ALL.into()]).collect();
+        let against: Vec<String> = picks.iter().map(|i| i.get(&pool).clone()).collect();
+        let cfg = names
+            .iter()
+            .fold(RunConfig::default(), |c, n| c.drift_target(n.clone(), DriftTarget::new()))
+            .drift_against(against.clone());
+
+        let selected = cfg.selected_drift_targets().unwrap();
+        let unique: std::collections::BTreeSet<&str> = selected.iter().copied().collect();
+        prop_assert_eq!(unique.len(), selected.len());
+        prop_assert!(selected.iter().all(|t| *t == LIVE || names.iter().any(|n| n == t)));
+        if against.iter().any(|a| a == ALL) {
+            prop_assert_eq!(selected.len(), names.len() + 1);
+        }
     }
 }

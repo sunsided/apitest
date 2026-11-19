@@ -16,6 +16,7 @@ use apitest::contract::{Lockfile, Severity};
 use apitest::load::{Executor, LoadPlan, Scenario, run_load};
 use apitest::prelude::*;
 use apitest::report::{Outcome, junit_xml};
+use apitest::runner::check_drift;
 use apitest::script::{LoadOptions, load_suites};
 
 /// Starts the billing service in the given version.
@@ -437,6 +438,88 @@ async fn utoipa_style_in_process_live_document() {
     let report = run_suite(&suite, &cfg(&srv)).await;
     assert!(report.drift[0].is_breaking());
     assert_eq!(report.drift[0].source, "in-process document");
+}
+
+/// Each selected drift target gets its own report; a breaking named target fails
+/// the suite, and a target without a spec for the contract is skipped.
+#[tokio::test(flavor = "multi_thread")]
+async fn named_drift_targets_are_checked_and_reported_separately() {
+    let srv = server(demo::Variant::V1_0).await;
+    let specs = rust_suite::specs_dir();
+    let c = cfg(&srv)
+        .drift_target(
+            "qa",
+            DriftTarget::new().file("billing", specs.join("billing-1.1.yaml")),
+        )
+        .drift_target(
+            "prod",
+            DriftTarget::new().file("billing", specs.join("billing-2.0.yaml")),
+        )
+        // No spec for billing, only for a contract this suite lacks: skipped.
+        .drift_target(
+            "hub",
+            DriftTarget::new().file("hub", specs.join("billing-2.0.yaml")),
+        )
+        .drift_against(["all"]);
+    let report = run_suite(&rust_suite::billing_suite().unwrap(), &c).await;
+
+    let seen: Vec<_> = report
+        .drift
+        .iter()
+        .map(|d| (d.target.as_str(), d.live_version.as_str(), d.is_breaking()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("live", "1.0.0", false),
+            ("prod", "2.0.0", true),
+            ("qa", "1.1.0", false)
+        ]
+    );
+    let err = report.setup_error.as_deref().unwrap();
+    assert!(
+        err.contains("compared spec(s) are incompatible with pinned contract(s): billing @ prod"),
+        "{err}"
+    );
+    assert!(
+        report
+            .tests
+            .iter()
+            .all(|t| matches!(t.outcome, Outcome::Skipped { .. }))
+    );
+
+    let xml = junit_xml(&[report]);
+    assert!(xml.contains(r#"name="[contract] billing""#));
+    assert!(xml.contains(r#"name="[contract] billing @ prod""#));
+    assert!(xml.contains(r#"message="prod spec v2.0.0 is incompatible"#));
+}
+
+/// Selecting only a file target fetches nothing, so no service is needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_drift_target_needs_no_running_service() {
+    // Nothing listens here.
+    let c = RunConfig::new("http://127.0.0.1:9")
+        .drift_target(
+            "prod",
+            DriftTarget::new().file("billing", rust_suite::specs_dir().join("billing-1.1.yaml")),
+        )
+        .drift_against(["prod"]);
+    let suite = rust_suite::billing_suite().unwrap();
+
+    let drift = check_drift(&suite.contracts, &c).await.unwrap();
+    assert_eq!(drift.len(), 1);
+    assert_eq!(drift[0].target, "prod");
+    assert!(!drift[0].is_breaking());
+    assert!(drift[0].source.ends_with("billing-1.1.yaml"));
+
+    // The live target, by contrast, does need the service.
+    let err = check_drift(&suite.contracts, &c.clone().drift_against(["live"]))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("loading the 'live' spec of contract 'billing'"),
+        "{err:#}"
+    );
 }
 
 /// The `JUnit` report contains the contract failure and the skipped tests.

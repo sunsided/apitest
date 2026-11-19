@@ -8,9 +8,13 @@
 //! * Before a suite runs, the service's *live* spec is diffed against the pinned
 //!   one, restricted to the used surface ([`Contract::diff`]). Breaking findings
 //!   fail the suite.
+//! * Instead of (or besides) the live spec, the pin can be diffed against named
+//!   comparison specs ([`DriftTarget`]: files or URLs per environment, e.g. `dev`,
+//!   `qa`, `prod` or a local branch), so the check needs no running service.
 
 mod drift;
 mod lockfile;
+mod target;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -24,6 +28,7 @@ use sha2::{Digest, Sha256};
 
 pub use drift::{DriftReport, Finding, Severity};
 pub use lockfile::{LockedContract, Lockfile};
+pub use target::{ALL, DriftTarget, LIVE, SpecSource};
 
 use crate::http::RequestOpts;
 
