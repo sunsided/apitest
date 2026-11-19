@@ -1,5 +1,7 @@
 //! `apitest` command-line runner.
 
+#![forbid(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 

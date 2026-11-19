@@ -14,6 +14,8 @@
 //! * Test ids are the module path plus the function name (`billing::create_invoice`),
 //!   which is what rust-analyzer's "Run test" passes to the harness.
 
+#![forbid(unsafe_code)]
+
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};

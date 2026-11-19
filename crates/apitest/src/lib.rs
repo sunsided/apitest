@@ -19,6 +19,8 @@
 //! options, responses) is a [`serde_json::Value`], so a fixture written in
 //! Rust can be consumed by a JS test and vice versa.
 
+#![forbid(unsafe_code)]
+
 /// Compiles and runs the README examples as doctests.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]

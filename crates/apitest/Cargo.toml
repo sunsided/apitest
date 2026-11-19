@@ -96,3 +96,6 @@ required-features = ["harness", "macros"]
 name = "billing_harness"
 harness = false
 required-features = ["harness", "axum", "rhai", "js"]
+
+[lints]
+workspace = true

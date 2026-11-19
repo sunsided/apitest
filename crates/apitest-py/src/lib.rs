@@ -4,6 +4,8 @@
 //! Python code runs; HTTP calls release it, so parallel tests and load VUs
 //! overlap on I/O. Values cross the boundary as JSON.
 
+#![forbid(unsafe_code)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

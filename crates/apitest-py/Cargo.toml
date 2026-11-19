@@ -17,3 +17,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
+
+[lints]
+workspace = true
