@@ -1,0 +1,5 @@
+{
+  "extends": "../../demo/suites/jsconfig.json",
+  "files": ["../cli/types/index.d.ts"],
+  "include": ["must-fail.js"]
+}
