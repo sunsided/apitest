@@ -1,0 +1,43 @@
+[package]
+name = "apitest-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# A separate workspace: fuzzing needs nightly and stays out of the root workspace.
+[workspace]
+
+[dependencies]
+apitest = { path = "../crates/apitest", default-features = false }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "spec_from_bytes"
+path = "fuzz_targets/spec_from_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "drift_diff"
+path = "fuzz_targets/drift_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nova_config"
+path = "fuzz_targets/nova_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "traceparent"
+path = "fuzz_targets/traceparent.rs"
+test = false
+doc = false
+bench = false

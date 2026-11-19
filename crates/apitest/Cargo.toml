@@ -48,6 +48,7 @@ axum = { version = "0.8", optional = true, default-features = false, features = 
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["json", "form", "query"] }
+proptest = "1"
 
 [[example]]
 name = "demo_server"
@@ -56,6 +57,10 @@ required-features = ["axum"]
 [[example]]
 name = "billing"
 required-features = ["axum", "rhai", "js"]
+
+[[test]]
+name = "it"
+required-features = ["load"]
 
 [[test]]
 name = "scenarios"

@@ -226,3 +226,23 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: task py:test
+
+  fuzz:
+    name: fuzz targets build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: cargo +nightly fuzz build
+        working-directory: fuzz
+      - run: cargo fmt --all --check && cargo +nightly clippy --all-targets -- -D warnings
+        working-directory: fuzz

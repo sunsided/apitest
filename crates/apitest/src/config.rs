@@ -104,9 +104,16 @@ impl ProjectConfig {
     pub fn load(path: &Path) -> Result<ProjectConfig> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
-        let mut cfg: ProjectConfig = from_nova(&text, CONFIG_SCHEMA, &path.display().to_string())?;
+        let mut cfg = Self::parse(&text, &path.display().to_string())?;
         cfg.root = path.parent().map(Path::to_path_buf).unwrap_or_default();
         Ok(cfg)
+    }
+
+    /// Parses `apitest.nova` source text and validates it against [`CONFIG_SCHEMA`].
+    /// `what` names the source in error messages. Relative paths resolve against
+    /// the current directory until [`ProjectConfig::root`] is set.
+    pub fn parse(text: &str, what: &str) -> Result<ProjectConfig> {
+        from_nova(text, CONFIG_SCHEMA, what)
     }
 
     /// Looks for `apitest.nova` in `dir` and its parents.

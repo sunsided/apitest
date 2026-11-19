@@ -295,16 +295,26 @@ impl Contract {
     /// Loads a pinned spec from disk.
     pub fn pinned(name: &str, spec: impl AsRef<Path>) -> Result<Contract> {
         let spec_path = spec.as_ref().to_path_buf();
+        let pinned = Spec::from_file(&spec_path)?;
         Ok(Contract {
-            name: name.into(),
-            pinned: Spec::from_file(&spec_path)?,
             spec_path,
+            ..Contract::from_spec(name, pinned)
+        })
+    }
+
+    /// Pins an already loaded spec. [`Contract::spec_path`] stays empty, so the
+    /// contract cannot be recorded in a lockfile relative to its file.
+    pub fn from_spec(name: &str, pinned: Spec) -> Contract {
+        Contract {
+            name: name.into(),
+            spec_path: PathBuf::new(),
+            pinned,
             live_spec: None,
             service: None,
             mode: Compat::Tolerant,
             usage: Mutex::default(),
             validators: Mutex::default(),
-        })
+        }
     }
 
     /// Where to fetch the service's current spec from before the suite runs
@@ -970,14 +980,16 @@ pub struct LockedContract {
 impl Lockfile {
     pub fn load(path: &Path) -> Result<Option<Lockfile>> {
         match std::fs::read_to_string(path) {
-            Ok(s) => Ok(Some(crate::config::from_nova(
-                &s,
-                crate::config::LOCK_SCHEMA,
-                &path.display().to_string(),
-            )?)),
+            Ok(s) => Ok(Some(Self::parse(&s, &path.display().to_string())?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Parses `apitest.lock.nova` source text and validates it against the lock schema.
+    /// `what` names the source in error messages.
+    pub fn parse(text: &str, what: &str) -> Result<Lockfile> {
+        crate::config::from_nova(text, crate::config::LOCK_SCHEMA, what)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
