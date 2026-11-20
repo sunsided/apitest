@@ -803,3 +803,40 @@ fn secret_query_values_never_reach_stderr_even_in_errors() {
     assert!(err.contains("q=hello"), "{err}");
     assert!(!err.contains("xyz"), "{err}");
 }
+
+/// Credentials written inline in the path, and query names such as
+/// `oauth_signature`, are masked in an echoed body like `--query` ones, while an
+/// idempotency key stays ordinary data (headers use the same name test).
+#[test]
+fn inline_and_signature_query_values_are_masked_on_stdout() {
+    let dir = project(&serve(), "");
+    let o = apitest(
+        &dir,
+        &[
+            "hub",
+            "GET",
+            "/echo?access_token=inline-secret&oauth_signature=sig-secret",
+            "--query",
+            "idempotency_key=idem-1234",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let out = stdout(&o);
+    for secret in ["inline-secret", "sig-secret"] {
+        assert!(!out.contains(secret), "{secret} leaked: {out}");
+    }
+    assert!(out.contains("idem-1234"), "{out}");
+}
+
+/// A password in the service URL never shows in a request error.
+#[test]
+fn service_userinfo_never_reaches_error_messages() {
+    let dir = project("http://user:url-secret@127.0.0.1:9", "");
+    let o = apitest(&dir, &["hub", "GET", "/x"]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+
+    let err = stderr(&o);
+    assert!(err.contains("GET http://127.0.0.1:9/x failed"), "{err}");
+    assert!(!err.contains("url-secret"), "{err}");
+}

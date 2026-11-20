@@ -118,6 +118,14 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
     Ok((k.to_string(), v.to_string()))
 }
 
+/// The query pairs written inline in `path` (`/export?access_token=...`), so
+/// their credentials are registered like `--query` ones.
+fn path_query(path: &str) -> Vec<(String, String)> {
+    reqwest::Url::parse(&format!("http://path.invalid{path}"))
+        .map(|u| u.query_pairs().into_owned().collect())
+        .unwrap_or_default()
+}
+
 /// Runs `apitest call`. `Ok(false)` means the status was not the expected one.
 ///
 /// # Errors
@@ -140,7 +148,9 @@ pub async fn call(a: Args, redactor: &Redactor) -> Result<bool> {
     // Only the actor this call uses must resolve: an unrelated actor's missing
     // secret doesn't block a one-off request.
     cfg.actors.retain(|name, _| a.actor.as_ref() == Some(name));
-    output::register_secrets(redactor, &a.header, &a.query);
+    let mut query = a.query.clone();
+    query.extend(path_query(&a.path));
+    output::register_secrets(redactor, &a.header, &query);
     let opts = request_opts(&a)?;
     let resp = send(&cfg, &a, opts).await?;
     if a.verbose {
@@ -253,7 +263,19 @@ fn status_ok(resp: &Response, expect: Option<u16>, redactor: &Redactor) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_header, parse_timeout};
+    use super::{parse_header, parse_timeout, path_query};
+
+    #[test]
+    fn inline_query_pairs_are_found() {
+        assert_eq!(
+            path_query("/export?access_token=abc123&page=2"),
+            vec![
+                ("access_token".to_string(), "abc123".to_string()),
+                ("page".to_string(), "2".to_string())
+            ]
+        );
+        assert_eq!(path_query("/plain"), vec![]);
+    }
 
     #[test]
     fn bad_timeouts_are_usage_errors_not_panics() {
