@@ -136,7 +136,9 @@ fn register_value(redactor: &Redactor, v: &str) {
 /// words (split at `-`, `_`, `.` and camelCase, ignoring case): one of them is
 /// `token`, `secret`, `password`, `passwd`, `credential(s)`, `signature`,
 /// `sig`, `session`, `cookie`, `auth`, `authorization` or `apikey`, or the
-/// last word is `key` and the name isn't an idempotency key. So `accessToken`,
+/// last word is `key` and the name isn't an idempotency key, or the last word
+/// ends in `token`, `secret`, `password`, `passwd`, `signature` or `apikey`
+/// (run-together names like `accesstoken`). So `accessToken`,
 /// `oauth_signature`, `X-Amz-Signature` and `X-Api-Key` count, while
 /// `keyword`, `author`, `monkey`, `X-Key-Id` and `Idempotency-Key` don't.
 fn is_secret_name(name: &str) -> bool {
@@ -155,9 +157,21 @@ fn is_secret_name(name: &str) -> bool {
         "authorization",
         "apikey",
     ];
+    // Endings catch run-together names (`accesstoken`, `clientsecret`).
+    const ENDINGS: [&str; 6] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "signature",
+        "apikey",
+    ];
     let words = name_words(name);
 
     words.iter().any(|w| WORDS.contains(&w.as_str()))
+        || words
+            .last()
+            .is_some_and(|w| ENDINGS.iter().any(|e| w.ends_with(e)))
         || (words.last().is_some_and(|w| w == "key") && !words.iter().any(|w| w == "idempotency"))
 }
 
@@ -294,6 +308,10 @@ mod tests {
             "credential",
             "Authorization",
             "X-Auth-Token",
+            "accesstoken",
+            "apitoken",
+            "clientsecret",
+            "x-apikey",
         ] {
             assert!(is_secret_name(n), "{n}");
         }
