@@ -1,5 +1,6 @@
-//! Loads arbitrary text as a `.feature` file, with its first line as the
-//! `--tags` expression: loading may fail, but never panic.
+//! Loads arbitrary text as a `.feature` file: loading may fail, but never
+//! panic. A first line that starts like a tag expression (`@`, `not`, `(`) is
+//! taken as `--tags` instead, so most inputs still reach the feature parser.
 
 #![no_main]
 
@@ -21,9 +22,16 @@ fuzz_target!(|text: &str| {
         return;
     }
 
-    let (tags, source) = text.split_once('\n').unwrap_or(("", text));
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let first = first.trim_end_matches('\r');
+    let is_tags = ["@", "not", "("].iter().any(|p| first.starts_with(p));
+    let (tags, source) = if is_tags {
+        (Some(first), rest)
+    } else {
+        (None, text)
+    };
     let opts = FeatureOptions {
-        tags: (!tags.is_empty()).then(|| tags.to_string()),
+        tags: tags.map(str::to_string),
     };
     let _ = load_str(source, Path::new("fuzz.feature"), &opts, steps());
 });
