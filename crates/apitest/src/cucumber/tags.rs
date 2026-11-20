@@ -140,6 +140,23 @@ pub(super) fn test_opts(tags: &[String]) -> Result<TestOpts> {
     Ok(opts)
 }
 
+/// Fails when `tags` of a rule, scenario or `Examples:` block hold a contract
+/// tag: contracts belong to the suite, so they are read from the feature only.
+///
+/// # Errors
+///
+/// Fails with the first such tag and `place`.
+pub(super) fn no_contract_tags(tags: &[String], place: &str) -> Result<()> {
+    if let Some(tag) = tags
+        .iter()
+        .find(|t| CONTRACT_TAGS.iter().any(|p| t.starts_with(p)))
+    {
+        bail!("@{tag} on {place}: contract tags belong on the feature");
+    }
+
+    Ok(())
+}
+
 /// `5s`, `250ms`, `2m` as a duration; huge values saturate.
 ///
 /// # Errors

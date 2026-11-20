@@ -454,10 +454,20 @@ fn fill_from_table(w: &World, rows: &[Vec<String>], opts: &mut RequestOpts) -> R
     Ok(())
 }
 
-/// JSON equality where `4200` and `4200.0` are the same number.
+/// JSON equality where `4200` and `4200.0` are the same number, at any depth.
+/// Integers compare exactly; only a float on either side compares as `f64`.
 fn same(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Number(x), Value::Number(y)) => match (x.as_i128(), y.as_i128()) {
+            (Some(x), Some(y)) => x == y,
+            _ => x.as_f64() == y.as_f64(),
+        },
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+        }
         _ => a == b,
     }
 }
@@ -514,5 +524,13 @@ mod tests {
     fn numbers_compare_by_value() {
         assert!(same(&serde_json::json!(4200), &serde_json::json!(4200.0)));
         assert!(!same(&serde_json::json!("4200"), &serde_json::json!(4200)));
+        assert!(same(
+            &serde_json::json!({ "n": [4200] }),
+            &serde_json::json!({ "n": [4200.0] })
+        ));
+        assert!(!same(
+            &serde_json::json!(9_007_199_254_740_993_u64),
+            &serde_json::json!(9_007_199_254_740_992_u64)
+        ));
     }
 }

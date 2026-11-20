@@ -126,6 +126,9 @@ impl Steps {
         F: Fn(World, StepArgs) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
+        // Compiled alone first: a pattern that only compiles inside the
+        // wrapper (`x)|(.*`) would close its group and escape the anchors.
+        Regex::new(pattern).with_context(|| format!("invalid step pattern: {pattern}"))?;
         let re = Regex::new(&format!("^(?:{pattern})$"))
             .with_context(|| format!("invalid step pattern: {pattern}"))?;
         self.defs.push(StepDef {
@@ -223,5 +226,10 @@ mod tests {
     #[test]
     fn invalid_patterns_are_rejected() {
         assert!(Steps::empty().step("(", |_w, _a| async { Ok(()) }).is_err());
+        assert!(
+            Steps::empty()
+                .step("x)|(.*", |_w, _a| async { Ok(()) })
+                .is_err()
+        );
     }
 }

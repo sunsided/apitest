@@ -51,9 +51,20 @@ pub(super) struct Instance {
 ///
 /// # Errors
 ///
-/// Fails when a row has a different number of cells than the table header.
+/// Fails when an outline has no `Examples:`, an `Examples:` block has no rows,
+/// or a row has a different number of cells than the table header: each would
+/// otherwise run the steps with `<placeholders>` in them, or nothing at all.
 pub(super) fn expand(sc: &Scenario) -> Result<Vec<Instance>> {
     let name = sc.name.trim().to_string();
+    let outline = matches!(sc.keyword.trim(), "Scenario Outline" | "Scenario Template");
+    if outline && sc.examples.is_empty() {
+        bail!(
+            "'{name}' (line {}) is a {} without `Examples:`",
+            sc.position.line,
+            sc.keyword.trim()
+        );
+    }
+
     if sc.examples.is_empty() {
         return Ok(vec![Instance {
             name,
@@ -64,8 +75,16 @@ pub(super) fn expand(sc: &Scenario) -> Result<Vec<Instance>> {
 
     let mut out = vec![];
     for ex in &sc.examples {
-        let Some((header, rows)) = ex.table.as_ref().and_then(|t| t.rows.split_first()) else {
-            continue;
+        let Some((header, rows)) = ex
+            .table
+            .as_ref()
+            .and_then(|t| t.rows.split_first())
+            .filter(|(_, rows)| !rows.is_empty())
+        else {
+            bail!(
+                "examples of '{name}' (line {}) have no rows",
+                ex.position.line
+            );
         };
 
         for row in rows {
@@ -163,11 +182,29 @@ fn within(text: &str) -> Result<Option<(Duration, &str)>> {
     Ok(Some((d, inner)))
 }
 
-/// `<placeholder>`s of an outline row filled into `s`.
+/// `<placeholder>`s of an outline row filled into `s` in one pass, so a value
+/// is never scanned for placeholders itself. Unknown ones stay as written.
 fn fill(s: &str, values: &[(String, String)]) -> String {
-    values
-        .iter()
-        .fold(s.to_string(), |s, (k, v)| s.replace(&format!("<{k}>"), v))
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 1..];
+        let value = tail.find('>').and_then(|end| {
+            let key = &tail[..end];
+            values.iter().find(|(k, _)| k == key).map(|(_, v)| (v, end))
+        });
+        if let Some((v, end)) = value {
+            out.push_str(v);
+            rest = &tail[end + 1..];
+        } else {
+            out.push('<');
+            rest = tail;
+        }
+    }
+
+    out.push_str(rest);
+    out
 }
 
 /// Fills `<placeholder>`s of an outline into a step's text, docstring and table.
@@ -218,6 +255,12 @@ mod tests {
             docstring("\nline 1\nline 2\n"),
             (None, "line 1\nline 2".into())
         );
+    }
+
+    #[test]
+    fn row_values_are_not_filled_again() {
+        let values = [("a".into(), "<b>".into()), ("b".into(), "x".into())];
+        assert_eq!(fill("<a> <b> <c> a<b", &values), "<b> x <c> a<b");
     }
 
     #[test]

@@ -156,6 +156,8 @@ impl Compiler {
                 .copied()
                 .chain(rule.background.iter().flat_map(|b| &b.steps))
                 .collect();
+            let place = format!("rule '{}'", rule.name.trim());
+            tags::no_contract_tags(&rule.tags, &place).with_context(|| self.file.clone())?;
             let tags: Vec<String> = feature.tags.iter().chain(&rule.tags).cloned().collect();
             for sc in &rule.scenarios {
                 self.scenario(&mut suite, Some(rule.name.trim()), &bg, sc, &tags)?;
@@ -175,7 +177,8 @@ impl Compiler {
     }
 
     /// Adds the tests of one scenario (one per outline row) that the tag
-    /// filter selects.
+    /// filter selects. Every row's steps are matched, selected or not, so an
+    /// undefined step fails the load whatever `--tags` picks.
     fn scenario(
         &mut self,
         suite: &mut Suite,
@@ -184,7 +187,20 @@ impl Compiler {
         sc: &Scenario,
         inherited: &[String],
     ) -> Result<()> {
-        for inst in plan::expand(sc)? {
+        let place = format!("scenario '{}'", sc.name.trim());
+        tags::no_contract_tags(&sc.tags, &place).with_context(|| self.file.clone())?;
+        for inst in plan::expand(sc).with_context(|| self.file.clone())? {
+            tags::no_contract_tags(&inst.tags, &format!("the examples of {place}"))
+                .with_context(|| self.file.clone())?;
+            let steps = background.iter().copied().chain(&sc.steps);
+            let planned = plan::plan(
+                steps,
+                &inst.values,
+                &self.file,
+                &self.steps,
+                &mut self.problems,
+            );
+
             let tags: Vec<String> = inherited
                 .iter()
                 .chain(&sc.tags)
@@ -199,14 +215,6 @@ impl Compiler {
                 Some(r) => format!("{r}: {}", inst.name),
                 None => inst.name,
             };
-            let steps = background.iter().copied().chain(&sc.steps);
-            let planned = plan::plan(
-                steps,
-                &inst.values,
-                &self.file,
-                &self.steps,
-                &mut self.problems,
-            );
             let opts = tags::test_opts(&tags)
                 .with_context(|| format!("{}: scenario '{name}'", self.file))?;
             suite.add_test(&name, opts, scenario_body(planned, self.steps.clone()));
@@ -263,21 +271,37 @@ async fn run_step(f: &StepFn, w: &World, args: &StepArgs, within: Option<Within>
         return f(w.clone(), args.clone()).await;
     };
 
+    if within.resend {
+        // Without an earlier request there is nothing to re-send, ever.
+        w.last_request()?;
+    }
+
     let mut retry = crate::dsl::Retry::new(within.timeout);
-    let mut first = true;
+    // The check's latest failure, so a failing re-send still reports the
+    // check that was waited for (the re-send's error as its cause).
+    let mut check_failure: Option<String> = None;
     loop {
-        if within.resend && !first {
+        if let Some(check) = check_failure.take() {
             // A failed re-send is a failed attempt like a failed check.
             if let Err(e) = builtin::resend(w).await {
-                retry.wait(e).await?;
+                retry
+                    .wait(
+                        e.context("re-sending the request failed")
+                            .context(check.clone()),
+                    )
+                    .await?;
+                check_failure = Some(check);
                 continue;
             }
         }
 
-        first = false;
         match f(w.clone(), args.clone()).await {
             Ok(()) => return Ok(()),
-            Err(e) => retry.wait(e).await?,
+            Err(e) => {
+                let message = format!("{e:#}");
+                retry.wait(e).await?;
+                check_failure = within.resend.then_some(message);
+            }
         }
     }
 }
@@ -327,6 +351,37 @@ Feature: f
         .unwrap()
         .to_string();
         assert!(e.contains("x.feature:6: ambiguous step"), "{e}");
+    }
+
+    #[test]
+    fn malformed_features_fail_the_load() {
+        let err = |src: &str, opts: &FeatureOptions| {
+            let steps = Arc::new(Steps::builtin());
+            format!(
+                "{:#}",
+                load_str(src, Path::new("x.feature"), opts, steps)
+                    .err()
+                    .unwrap()
+            )
+        };
+        let none = FeatureOptions::default();
+
+        let outline = "Feature: f\n  Scenario Outline: o <id>\n    Then the status is <id>\n";
+        assert!(err(outline, &none).contains("without `Examples:`"));
+
+        let empty = format!("{outline}    Examples:\n      | id |\n");
+        assert!(err(&empty, &none).contains("have no rows"));
+
+        let tagged =
+            "Feature: f\n  @contract:a=a.yaml\n  Scenario: s\n    Then the status is 200\n";
+        assert!(err(tagged, &none).contains("contract tags belong on the feature"));
+
+        // A scenario `--tags` leaves out is still matched against the steps.
+        let skipped = "Feature: f\n  @slow\n  Scenario: s\n    When \"a\" frobnicates\n";
+        let only_fast = FeatureOptions {
+            tags: Some("not @slow".into()),
+        };
+        assert!(err(skipped, &only_fast).contains("undefined step"));
     }
 
     #[test]

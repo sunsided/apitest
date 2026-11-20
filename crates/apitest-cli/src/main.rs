@@ -386,11 +386,22 @@ async fn run_tests(args: RunArgs, redactor: &Redactor) -> Result<bool> {
         cfg.max_parallel = n;
     }
 
+    // Checked up front: only `.feature` files read it, so a run without one
+    // would never report a typo in it.
+    if let Some(t) = &args.tags {
+        apitest::cucumber::TagFilter::parse(t).context("--tags")?;
+    }
+
     let opts = LoadOptions {
         js_workers: project.as_ref().and_then(|p| p.js_workers).unwrap_or(2),
         tags: args.tags,
     };
     let suites = load_all(&args.files, project.as_ref(), &opts)?;
+    if let Some(t) = &opts.tags
+        && suites.iter().all(|s| s.tests.is_empty())
+    {
+        eprintln!("warning: --tags \"{t}\" selected no test (it applies to .feature files only)");
+    }
     drift::check_targets(&cfg, &suites, extra_project(&args.files, project.as_ref()))?;
 
     let color = diagnostic::use_color(&std::io::stdout());
