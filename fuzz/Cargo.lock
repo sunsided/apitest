@@ -59,7 +59,9 @@ name = "apitest"
 version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
+ "bytes",
  "dotenvy",
+ "encoding_rs",
  "gherkin",
  "jsonschema",
  "novafile-schema",
