@@ -99,12 +99,17 @@ pub fn check_service(cfg: &RunConfig, service: &str, source: &str) -> Result<()>
 ///
 /// Fails naming the service, its URL and `source`.
 pub fn check_service_url(service: &str, url: &str, source: &str) -> Result<()> {
-    let usable = reqwest::Url::parse(url)
-        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host());
+    // A query or fragment would swallow the appended path (`/api?t=1` + `/users`).
+    let usable = reqwest::Url::parse(url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.has_host()
+            && u.query().is_none()
+            && u.fragment().is_none()
+    });
     if !usable {
         bail!(
             "service '{service}' in {source} has the URL '{url}', which is not an absolute \
-             http:// or https:// URL\n\
+             http:// or https:// URL without a query or fragment\n\
              help: e.g.\n  services:\n    {service}: http://127.0.0.1:8080"
         );
     }
@@ -160,7 +165,15 @@ mod tests {
 
     #[test]
     fn service_urls_must_be_absolute_http() {
-        for bad in ["localhost:8080", "", "/api", "ftp://hub.test", "http://"] {
+        for bad in [
+            "localhost:8080",
+            "",
+            "/api",
+            "ftp://hub.test",
+            "http://",
+            "http://hub.test/api?tenant=1",
+            "http://hub.test/api#x",
+        ] {
             let cfg = RunConfig::default().service("hub", bad);
             let e = check_service(&cfg, "hub", "x.nova")
                 .unwrap_err()
