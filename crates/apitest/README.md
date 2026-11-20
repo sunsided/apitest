@@ -197,7 +197,8 @@ fixtures once per iteration.
 
 ## Script suites
 
-With the `rhai` or `js` feature, `apitest::script::load_suites` loads suites written in Rhai or JavaScript.
+With the `rhai`, `js` or `cucumber` feature, `apitest::script::load_suites` loads suites written in Rhai,
+JavaScript or Gherkin (`.feature` files).
 They get the same `cx` API and semantics as Rust suites, and fixture values are JSON, so a Rust fixture can
 feed a JS test:
 

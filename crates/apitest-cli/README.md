@@ -13,11 +13,8 @@ same services and credentials your suites use.
 ## Install
 
 ```bash
-cargo install apitest-cli          # or: npx @apitest/cli
+cargo install apitest-cli
 ```
-
-Prebuilt binaries for Linux, macOS and Windows are attached to each
-[GitHub release](https://github.com/sunsided/apitest/releases).
 
 ## Commands
 
@@ -42,8 +39,8 @@ apitest run --env-file .env.ci --redact 'cust-[0-9]+'      # variables from a .e
 
 ## Suites
 
-Suites are synchronous scripts, like k6. JavaScript runs in QuickJS with one runtime per worker or virtual
-user (`npx @apitest/cli` ships TypeScript declarations for autocompletion); Rhai is the other option:
+Suites are synchronous scripts, like k6, or Gherkin `.feature` files with a generic step library. JavaScript
+runs in QuickJS with one runtime per worker or virtual user:
 
 ```js
 const s = suite("billing");
