@@ -11,7 +11,7 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-apitest = { path = "../crates/apitest", default-features = false }
+apitest = { path = "../crates/apitest", default-features = false, features = ["cucumber"] }
 libfuzzer-sys = "0.4"
 
 # Copied from the root [workspace.lints]: `workspace = true` does not reach this separate workspace.
@@ -64,6 +64,13 @@ bench = false
 [[bin]]
 name = "dotenv"
 path = "fuzz_targets/dotenv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gherkin"
+path = "fuzz_targets/gherkin.rs"
 test = false
 doc = false
 bench = false

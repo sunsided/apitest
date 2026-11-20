@@ -1,4 +1,5 @@
-//! Shared plumbing for the scripting frontends (Rhai, JS) and the Python bindings.
+//! Shared plumbing for the scripting frontends (Rhai, JS), the Gherkin frontend's
+//! loader dispatch and the Python bindings.
 //!
 //! Script code is synchronous. [`SyncCtx`] wraps a [`Ctx`] and blocks on the async
 //! core, so it must be used from a non-runtime thread (`spawn_blocking` or a
@@ -188,26 +189,35 @@ where
 pub struct LoadOptions {
     /// Number of independent JS runtimes (one per VU under load).
     pub js_workers: usize,
+    /// Cucumber tag expression for `.feature` files (`@smoke and not @slow`).
+    /// Other frontends ignore it.
+    pub tags: Option<String>,
 }
 
 impl Default for LoadOptions {
     fn default() -> Self {
-        LoadOptions { js_workers: 1 }
+        LoadOptions {
+            js_workers: 1,
+            tags: None,
+        }
     }
 }
 
 /// Loads suites from a script file, picking the frontend by extension.
 ///
-/// `.rhai` goes to the Rhai frontend and `.js`/`.mjs` to the JS frontend, each
-/// only when its feature is enabled.
+/// `.rhai` goes to the Rhai frontend, `.js`/`.mjs` to the JS frontend and
+/// `.feature` to the Gherkin frontend, each only when its feature is enabled.
 ///
 /// # Errors
 ///
 /// Fails when the file has no extension, no enabled frontend handles it, or the
 /// frontend fails to read or evaluate the script.
 #[cfg_attr(
-    not(feature = "js"),
-    expect(unused_variables, reason = "`opts` only configures the JS frontend")
+    not(any(feature = "js", feature = "cucumber")),
+    expect(
+        unused_variables,
+        reason = "`opts` only configures the JS and Gherkin frontends"
+    )
 )]
 pub fn load_suites(path: &Path, opts: &LoadOptions) -> Result<Vec<Suite>> {
     match path.extension().and_then(|e| e.to_str()) {
@@ -215,6 +225,13 @@ pub fn load_suites(path: &Path, opts: &LoadOptions) -> Result<Vec<Suite>> {
         Some("rhai") => rhai::load(path),
         #[cfg(feature = "js")]
         Some("js" | "mjs") => js::load(path, opts.js_workers),
+        #[cfg(feature = "cucumber")]
+        Some("feature") => crate::cucumber::load(
+            path,
+            &crate::cucumber::FeatureOptions {
+                tags: opts.tags.clone(),
+            },
+        ),
         Some(ext) => bail!(
             "no frontend for '.{ext}' files (enabled: {})",
             enabled_frontends()
@@ -224,19 +241,26 @@ pub fn load_suites(path: &Path, opts: &LoadOptions) -> Result<Vec<Suite>> {
 }
 
 /// Human-readable list of the script extensions compiled into this build.
-fn enabled_frontends() -> &'static str {
-    match (cfg!(feature = "rhai"), cfg!(feature = "js")) {
-        (true, true) => ".rhai, .js",
-        (true, false) => ".rhai",
-        (false, true) => ".js",
-        (false, false) => "none",
+fn enabled_frontends() -> String {
+    let on: Vec<&str> = [
+        (cfg!(feature = "rhai"), ".rhai"),
+        (cfg!(feature = "js"), ".js"),
+        (cfg!(feature = "cucumber"), ".feature"),
+    ]
+    .into_iter()
+    .filter_map(|(on, ext)| on.then_some(ext))
+    .collect();
+    if on.is_empty() {
+        "none".into()
+    } else {
+        on.join(", ")
     }
 }
 
 /// Resolves a path named in a script against the script's directory `base`.
 ///
 /// Absolute paths are returned unchanged.
-#[cfg(any(feature = "rhai", feature = "js"))]
+#[cfg(any(feature = "rhai", feature = "js", feature = "cucumber"))]
 pub(crate) fn resolve_relative(base: &Path, p: &str) -> std::path::PathBuf {
     let path = Path::new(p);
     if path.is_absolute() {

@@ -17,7 +17,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-apitest = { workspace = true, features = ["rhai", "js", "load", "diagnostics"] }
+apitest = { workspace = true, features = ["rhai", "js", "cucumber", "load", "diagnostics"] }
 anyhow.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

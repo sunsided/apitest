@@ -9,7 +9,7 @@
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
 
 API tests and load tests with scoped fixtures that always clean up, OpenAPI contract pinning with drift
-checks, and suites written in Rust, Rhai or JavaScript. Run them from `cargo test` or nextest, from your
+checks, and suites written in Rust, Rhai, JavaScript or Gherkin. Run them from `cargo test` or nextest, from your
 own code, or with the [`apitest` CLI](https://crates.io/crates/apitest-cli).
 
 - **Setup and teardown at every level.** Suite, virtual user, test and fixture scopes, plus per-test hooks
@@ -197,7 +197,8 @@ fixtures once per iteration.
 
 ## Script suites
 
-With the `rhai` or `js` feature, `apitest::script::load_suites` loads suites written in Rhai or JavaScript.
+With the `rhai`, `js` or `cucumber` feature, `apitest::script::load_suites` loads suites written in Rhai,
+JavaScript or Gherkin (`.feature` files).
 They get the same `cx` API and semantics as Rust suites, and fixture values are JSON, so a Rust fixture can
 feed a JS test:
 
@@ -223,6 +224,7 @@ redaction, trace propagation, drift targets, nextest and the scripting frontends
 | `axum`    | yes     | `TestServer::axum` for serving axum routers in-process |
 | `rhai`    | no      | Rhai scripting frontend |
 | `js`      | no      | JavaScript (QuickJS) scripting frontend |
+| `cucumber` | no     | Gherkin frontend: `.feature` files with a generic step library, `--tags` expressions |
 | `harness` | no      | `cargo test` / nextest integration (pulls in clap via libtest-mimic) |
 | `macros`  | no      | `#[apitest::test]`, `#[apitest::fixture]`, `#[apitest::suite]` |
 | `diagnostics` | no  | `SuiteReport::render_terminal`: failures as miette diagnostics on the terminal (reports stay plain text) |

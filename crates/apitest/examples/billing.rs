@@ -38,7 +38,10 @@ async fn main() -> Result<()> {
     )?);
     suites.extend(load_suites(
         &rust_suite::suites_dir().join("billing.js"),
-        &LoadOptions { js_workers: 2 },
+        &LoadOptions {
+            js_workers: 2,
+            ..Default::default()
+        },
     )?);
 
     let mut reports = vec![];

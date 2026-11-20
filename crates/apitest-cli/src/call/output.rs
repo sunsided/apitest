@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result};
 
 use apitest::Redactor;
 use apitest::http::Response;
+use apitest::redact::is_secret_name;
 use apitest::runner::RunConfig;
 
 use super::actor::credential_headers;
@@ -132,74 +133,6 @@ fn register_value(redactor: &Redactor, v: &str) {
     }
 }
 
-/// Whether a header or query parameter name is a credential's, judged by its
-/// words (split at `-`, `_`, `.` and camelCase, ignoring case): one of them is
-/// `token`, `secret`, `password`, `passwd`, `credential(s)`, `signature`,
-/// `sig`, `session`, `cookie`, `auth`, `authorization` or `apikey`, or the
-/// last word is `key` and the name isn't an idempotency key, or the last word
-/// ends in `token`, `secret`, `password`, `passwd`, `signature` or `apikey`
-/// (run-together names like `accesstoken`). So `accessToken`,
-/// `oauth_signature`, `X-Amz-Signature` and `X-Api-Key` count, while
-/// `keyword`, `author`, `monkey`, `X-Key-Id` and `Idempotency-Key` don't.
-fn is_secret_name(name: &str) -> bool {
-    const WORDS: [&str; 13] = [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "credential",
-        "credentials",
-        "signature",
-        "sig",
-        "session",
-        "cookie",
-        "auth",
-        "authorization",
-        "apikey",
-    ];
-    // Endings catch run-together names (`accesstoken`, `clientsecret`).
-    const ENDINGS: [&str; 6] = [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "signature",
-        "apikey",
-    ];
-    let words = name_words(name);
-
-    words.iter().any(|w| WORDS.contains(&w.as_str()))
-        || words
-            .last()
-            .is_some_and(|w| ENDINGS.iter().any(|e| w.ends_with(e)))
-        || (words.last().is_some_and(|w| w == "key") && !words.iter().any(|w| w == "idempotency"))
-}
-
-/// The lowercase words of a name, split at non-alphanumeric characters and at
-/// camelCase boundaries (`accessToken` → `access`, `token`).
-fn name_words(name: &str) -> Vec<String> {
-    let mut words = vec![];
-    let mut current = String::new();
-    let mut prev_lower = false;
-    for c in name.chars() {
-        if !c.is_ascii_alphanumeric() {
-            words.extend((!current.is_empty()).then(|| std::mem::take(&mut current)));
-            prev_lower = false;
-            continue;
-        }
-
-        if c.is_ascii_uppercase() && prev_lower {
-            words.push(std::mem::take(&mut current));
-        }
-
-        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
-        current.push(c.to_ascii_lowercase());
-    }
-
-    words.extend((!current.is_empty()).then_some(current));
-    words
-}
-
 /// Whether `name` is `Authorization` or `Proxy-Authorization`, whose values
 /// start with an auth scheme.
 fn is_authorization(name: &str) -> bool {
@@ -267,7 +200,7 @@ fn redact(name: &str, v: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_secret_name, is_sensitive, redact, request_url};
+    use super::{is_sensitive, redact, request_url};
 
     #[test]
     fn only_authorization_keeps_its_scheme() {
@@ -279,56 +212,6 @@ mod tests {
         assert_eq!(redact("Authorization", "raw-key"), "***");
         assert_eq!(redact("X-Session", "session abc"), "***");
         assert_eq!(redact("Cookie", "sid=1; Path=/"), "***");
-    }
-
-    #[test]
-    fn only_credential_query_names_are_secret_params() {
-        for n in [
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "token",
-            "api_key",
-            "apikey",
-            "key",
-            "password",
-            "client_secret",
-            "secret",
-            "sig",
-            "Signature",
-            "X-Api-Key",
-            "accessToken",
-            "clientSecret",
-            "authToken",
-            "userPassword",
-            "oauth_signature",
-            "X-Amz-Signature",
-            "session",
-            "Cookie",
-            "credential",
-            "Authorization",
-            "X-Auth-Token",
-            "accesstoken",
-            "apitoken",
-            "clientsecret",
-            "x-apikey",
-        ] {
-            assert!(is_secret_name(n), "{n}");
-        }
-
-        for n in [
-            "q",
-            "keyword",
-            "author",
-            "monkey",
-            "page",
-            "tokens_left",
-            "X-Idempotency-Key",
-            "X-Key-Id",
-            "oauth_nonce",
-        ] {
-            assert!(!is_secret_name(n), "{n}");
-        }
     }
 
     #[test]

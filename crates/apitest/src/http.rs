@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -678,7 +678,7 @@ fn to_value(v: impl Serialize) -> Value {
 }
 
 /// At most `n` bytes of `s` (cut back to a char boundary), with `…` if shortened.
-fn truncate(s: &str, n: usize) -> String {
+pub(crate) fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         return s.to_string();
     }
@@ -692,7 +692,7 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 /// A value as it appears in a URL or header: strings unquoted, the rest as JSON text.
-fn scalar(v: &Value) -> String {
+pub(crate) fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -958,7 +958,9 @@ fn put_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
 fn render_url(path: &str, params: &Map<String, Value>, base_url: &str) -> Result<String> {
     let mut rendered = path.to_string();
     for (k, v) in params {
-        rendered = rendered.replace(&format!("{{{k}}}"), &encode_segment(&scalar(v)));
+        let segment =
+            encode_segment(&scalar(v)).with_context(|| format!("path parameter '{k}'"))?;
+        rendered = rendered.replace(&format!("{{{k}}}"), &segment);
     }
 
     if rendered.contains('{') {
@@ -1039,8 +1041,17 @@ fn parse_body(text: &str) -> Value {
 
 /// Percent-encodes everything except RFC 3986 unreserved characters, so the
 /// value stays a single path segment.
-fn encode_segment(s: &str) -> String {
+///
+/// # Errors
+///
+/// Fails for `.` and `..`: URL parsers treat them as dot segments even when
+/// percent-encoded (`%2E%2E`), so they would move the request up the path.
+pub(crate) fn encode_segment(s: &str) -> Result<String> {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    ensure!(
+        s != "." && s != "..",
+        "the value `{s}` would be a dot segment and move the request up the path; it can't be sent as a path value"
+    );
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -1055,12 +1066,27 @@ fn encode_segment(s: &str) -> String {
         }
     }
 
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_text, without_query};
+    use serde_json::{Map, Value};
+
+    use super::{decode_text, render_url, without_query};
+
+    #[test]
+    fn path_values_stay_in_their_segment() {
+        let params = |v: &str| Map::from_iter([("id".to_string(), Value::String(v.into()))]);
+        let path = |v: &str| {
+            render_url("/invoices/{id}/lines", &params(v), "http://h.test")
+                .map(|u| reqwest::Url::parse(&u).unwrap().path().to_string())
+        };
+        assert_eq!(path("a/b?c").unwrap(), "/invoices/a%2Fb%3Fc/lines");
+        assert_eq!(path("...").unwrap(), "/invoices/.../lines");
+        assert!(path("..").is_err());
+        assert!(path(".").is_err());
+    }
 
     #[test]
     fn error_urls_drop_the_query() {

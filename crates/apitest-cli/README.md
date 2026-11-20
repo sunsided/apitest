@@ -6,18 +6,15 @@
 [![License](https://img.shields.io/crates/l/apitest-cli)](https://github.com/sunsided/apitest#license)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
 
-The `apitest` command: runs [`apitest`](https://crates.io/crates/apitest) suites written in Rhai or JavaScript,
+The `apitest` command: runs [`apitest`](https://crates.io/crates/apitest) suites written in Rhai, JavaScript or Gherkin,
 as functional tests or load tests, checks OpenAPI contracts for drift, and sends one-off requests with the
 same services and credentials your suites use.
 
 ## Install
 
 ```bash
-cargo install apitest-cli          # or: npx @apitest/cli
+cargo install apitest-cli
 ```
-
-Prebuilt binaries for Linux, macOS and Windows are attached to each
-[GitHub release](https://github.com/sunsided/apitest/releases).
 
 ## Commands
 
@@ -42,8 +39,8 @@ apitest run --env-file .env.ci --redact 'cust-[0-9]+'      # variables from a .e
 
 ## Suites
 
-Suites are synchronous scripts, like k6. JavaScript runs in QuickJS with one runtime per worker or virtual
-user (`npx @apitest/cli` ships TypeScript declarations for autocompletion); Rhai is the other option:
+Suites are synchronous scripts, like k6, or Gherkin `.feature` files with a generic step library. JavaScript
+runs in QuickJS with one runtime per worker or virtual user:
 
 ```js
 const s = suite("billing");

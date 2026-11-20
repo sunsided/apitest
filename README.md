@@ -14,7 +14,7 @@ API testing and load testing in Rust, with:
 
 - **Reliable setup/teardown at every level.** Suite, virtual user, test, fixture and per-test hooks, plus `cx.defer(...)` cleanups. Cleanups run in LIFO order **even when a test fails, panics or times out**.
 - **Contract pinning.** Suites bind to a checked-in OpenAPI document via `operationId`. Requests and responses are validated against it. Before any test runs, the service's *live* spec is diffed against the pin, limited to the operations and fields the suites actually use (recorded in `apitest.lock.nova`). Instead of, or besides, the live spec you can pick named comparison specs (files or URLs, e.g. what dev, QA and prod run, or your local branch), so the check doesn't need a running service. Incompatible changes fail loudly, reported per target.
-- **One core, four frontends.** Suites can be written in **Rust, Rhai, JavaScript (QuickJS) or Python**. Every frontend gets the same `cx` API and the same semantics. Fixture values are JSON, so a Rust fixture can feed a JS test.
+- **One core, five frontends.** Suites can be written in **Rust, Rhai, JavaScript (QuickJS) or Python**, or as **Gherkin `.feature` files** with a generic step library. Every frontend gets the same semantics and the same runner, and the scripting ones the same `cx` API. Fixture values are JSON, so a Rust fixture can feed a JS test.
 - **Functional and load runs from the same tests.** Any test can be a load scenario: constant VUs, a shared iteration budget, or ramping stages. You get HDR latency histograms and k6-style thresholds (`http.p95 < 300ms`).
 - **Library or standalone.** Use it from `cargo test` (libtest-mimic harness, with `#[apitest::test]` attribute macros if you like), with nextest (process-per-test aware), from your own code, from pytest, via the `apitest` CLI, or via `npx @apitest/cli`.
 - **In-process servers over real TCP.** `TestServer::axum(router)` (or `TestServer::spawn` for any framework) serves your app on an ephemeral port. Tests go through the whole ingress path: socket, HTTP, middleware, routing, extractors. Handlers are never called directly.
@@ -36,6 +36,7 @@ API testing and load testing in Rust, with:
   - [JavaScript suite](#javascript-suite)
   - [Python suite](#python-suite)
   - [Per-test setup and teardown](#per-test-setup-and-teardown)
+- [Gherkin (Cucumber)](#gherkin-cucumber)
 - [Contract pinning](#contract-pinning)
 - [Using it as a library (axum example)](#using-it-as-a-library-axum-example)
   - [Native-feeling Rust tests: attribute macros](#native-feeling-rust-tests-attribute-macros)
@@ -58,7 +59,7 @@ Four crates: the library, its proc macros, the CLI and the Python bindings. Libr
 
 ```
 crates/apitest      the library
-  features: load, axum (default) · rhai, js, harness, macros, diagnostics (opt-in) · full (all of them)
+  features: load, axum (default) · rhai, js, cucumber, harness, macros, diagnostics (opt-in) · full (all of them)
             --no-default-features = core only (runner, contracts, HTTP, reports, NOVA config)
   src/context.rs    scope chain (run → suite → vu → test), values, default headers, defer/unwind, guarded execution
   src/suite.rs      Suite / Fixture / TestCase / TestOpts (concurrency, resources, timeout, setup, teardown)
@@ -67,6 +68,7 @@ crates/apitest      the library
   src/http.rs       language-neutral RequestOpts / Response, contract-aware send
   src/load.rs       executors, metrics, thresholds
   src/script/       SyncCtx (blocking facade) + rhai.rs + js.rs
+  src/cucumber/     .feature files → suites: Gherkin parsing, tag expressions, step registry, built-in steps, per-scenario World
   src/serve.rs      TestServer (in-process, real TCP)
   src/harness.rs    cargo test / nextest integration
   src/registry.rs   collects #[apitest::test|fixture|suite] registrations (linkme)
@@ -74,10 +76,10 @@ crates/apitest      the library
   src/diagnostic.rs miette rendering for the terminal (feature diagnostics)
   src/config.rs     apitest.nova
 crates/apitest-macros  #[apitest::test], #[apitest::fixture], #[apitest::suite]
-crates/apitest-cli  the `apitest` binary (clap); depends on apitest with rhai, js, load, diagnostics
+crates/apitest-cli  the `apitest` binary (clap); depends on apitest with rhai, js, cucumber, load, diagnostics
 crates/apitest-py   pyo3 extension (`apitest._native`) + the `apitest` Python package (maturin)
 npm/                @apitest/cli: launcher + per-platform binary packages + TypeScript types for JS suites
-demo/               billing service specs (v1.0 pinned, v1.1 compatible, v2.0 breaking), suites in Rhai/JS, apitest.nova
+demo/               billing service specs (v1.0 pinned, v1.1 compatible, v2.0 breaking), suites in Rhai/JS/Gherkin, apitest.nova
 ```
 
 `apitest`, `apitest-macros` and `apitest-cli` publish to crates.io with one shared version. The Python bindings build in CI but are not on PyPI yet.
@@ -86,7 +88,7 @@ As a library you'd typically add it as a dev-dependency:
 
 ```toml
 [dev-dependencies]
-apitest = { version = "…", features = ["harness", "macros"] }   # + "rhai" / "js" for script suites
+apitest = { version = "…", features = ["harness", "macros"] }   # + "rhai" / "js" / "cucumber" for script suites
 ```
 
 `harness` brings in clap transitively (libtest-mimic parses `cargo test` arguments with it). That's why it's opt-in and belongs in `[dev-dependencies]`.
@@ -547,6 +549,62 @@ s.test("per-test setup and teardown", #{
 }, |cx| { /* body */ });
 ```
 
+## Gherkin (Cucumber)
+
+`.feature` files run on the same runner as the other frontends, so a Gherkin spec that is reviewed as documentation gets contract pinning, drift checks, validation, cleanups and the same reports. A feature becomes a suite, each scenario (and each row of a `Scenario Outline`) a test, a `Background:` the leading steps of every scenario, and a `Rule:` a prefix of its scenarios' names. The contract is declared with feature tags, and the generic steps cover actors, contract and raw calls, cleanups (`afterwards …`), remembered values, waiting (`within 10 seconds, …`) and JSON, status and header checks. [`demo/suites/billing.feature`](https://github.com/sunsided/apitest/blob/main/demo/suites/billing.feature) is the billing suite above:
+
+```gherkin
+@contract:billing=../specs/billing-1.0.yaml @live_spec:billing=/openapi.json
+Feature: billing-feature
+
+  Background:
+    Given "anon" is an anonymous actor on "billing"
+    And "anon" calls "issueToken" expecting 200 with:
+      | form | user | ${API_USER} |
+      | form | pass | ${API_PASS} |
+    And "user" is an actor on "billing" with the bearer token "{{response:/access_token}}"
+    And afterwards "user" calls "revokeToken" expecting 204
+
+  @parallel
+  Scenario: create and fetch invoice
+    When "user" calls "createInvoice" expecting 201 with the JSON body:
+      """json
+      { "amount": 4200, "currency": "EUR" }
+      """
+    And afterwards "user" calls "deleteInvoice" expecting 204 with:
+      | path | id | {{response:/id}} |
+    And the response contains:
+      """json
+      { "amount": 4200, "currency": "EUR", "status": "open" }
+      """
+```
+
+- **Tags.** `@contract:NAME=PATH`, `@live_spec:NAME=URL` and `@mode:NAME=MODE` on the feature declare contracts. `@parallel`, `@serial`, `@resource:NAME` and `@timeout:5s` on a feature, rule, scenario or `Examples:` block become test options (the innermost `@parallel`/`@serial` wins); other tags become test tags. `apitest run --tags "@smoke and not @slow"` selects scenarios.
+- **Values.** `${NAME}` is a variable (`--var`, the environment, `.env` files, `vars:`), `{{name}}` a value remembered with `I remember the response at "/id" as "name"`, and `{{response:/ptr}}` the latest response. Unresolved ones fail the step. Login and basic-auth steps keep `${NAME}` for the actor's credentials, so they are resolved and masked like configured actors; bearer tokens, credential headers and header values that come from a variable or a response are masked from the step that sets them. JSON is parsed before values are inserted into its strings, values in a raw request path are percent-encoded (`..` fails the step), the host of an absolute URL must be written out, and `with options:` can't pick another service or identity, so a response can neither restructure a body nor send a request (and its credentials) to another host. Headers set on the scope and redirects the service answers with are not limited to its origin yet; that is core behaviour of every frontend.
+- **Undefined or ambiguous steps** fail the load, with their lines, before anything is sent.
+
+Custom steps are Rust functions, registered next to the built-in ones:
+
+```rust
+let steps = Steps::builtin()
+    .step(r#""([^"]+)" is paid"#, |w, a| async move {
+        let id = w.interpolate(a.get(1)?)?;
+        w.actor("user")?
+            .call("payInvoice")
+            .path("id", &id)
+            .expect(200)
+            .await?;
+        Ok(())
+    })?;
+let suites = apitest::cucumber::load_with(
+    Path::new("suites/billing.feature"),
+    &FeatureOptions::default(),
+    Arc::new(steps),
+)?;
+```
+
+The step reference, the mapping onto suites and tests, and why this uses the `gherkin` parser rather than the `cucumber` crate's runner are in [`docs/design/cucumber.md`](https://github.com/sunsided/apitest/blob/main/docs/design/cucumber.md).
+
 ## Contract pinning
 
 ```text
@@ -723,6 +781,10 @@ cargo run -p apitest-cli -- load demo/suites/billing.js -t "create and fetch inv
 ```
 
 ```bash
+cd demo && cargo run -p apitest-cli -- run suites/billing.feature --tags "@parallel"   # Gherkin scenarios by tag
+```
+
+```bash
 cargo run -p apitest-cli -- contract check demo/suites/billing.rhai -u http://127.0.0.1:8080
 ```
 
@@ -840,6 +902,7 @@ cd crates/apitest-py && maturin develop && pytest -v
 | `cargo test -p apitest --features full --test scenarios` | drift (compatible/breaking/in-process doc), runtime validation, cleanup after failure/panic/timeout, serial vs parallel vs resources, lockfile, JUnit, Rhai/JS suites, Rust and JS load (ramping) |
 | `cargo test -p apitest --features full --test billing_harness` | the libtest harness with Rust, Rhai and JS suites against an in-process axum app |
 | `cargo test -p apitest --features full --test headers` | trace formats and correlation, opt-out at every level, parent traces, User-Agent precedence, all auth kinds, single-flight cached logins with 401 re-login, client-credentials expiry, named actors from Rust, JS and Rhai, `.env` files, up-front variable checks and masked secrets |
+| `cargo test -p apitest --features full --test it cucumber` | the Gherkin demo feature (passes, cleans up, skips on breaking drift), tag selection, failure location with cleanups, unresolved variables, masked secrets in step errors, `within` retries, custom Rust steps |
 | `cargo test -p apitest --features full --test it diagnostics` | miette cause chains in `render_terminal`, plain text in `render`, JUnit, JSON and `assert_passed` |
 | `cargo test -p apitest --features full --test care_flow` | the multi-actor, multi-service onboarding flow (Hub, App, mail mock) with step reports, rollback and a `finally` leftover check |
 | `cargo test -p apitest --features full --test macro_harness` | the same suite via `#[apitest::test]` / `#[apitest::fixture]` / `#[apitest::suite]` (`DEMO_VARIANT=2.0` shows drift) |

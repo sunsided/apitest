@@ -1,6 +1,6 @@
 [package]
 name = "apitest"
-description = "API testing and load testing with scoped fixtures, contract pinning and Rhai/JS/Python scripting"
+description = "API testing and load testing with scoped fixtures, contract pinning, Rhai/JS/Python scripting and Gherkin features"
 readme = "README.md"
 keywords = ["api", "testing", "openapi", "load-testing", "contract-testing"]
 categories = ["development-tools::testing", "web-programming::http-client"]
@@ -18,11 +18,13 @@ all-features = true
 # libtest harness (pulls clap via libtest-mimic) are opt-in.
 default = ["load", "axum"]
 ## Everything, as used by the CLI and the tests in this repo
-full = ["rhai", "js", "load", "harness", "axum", "macros", "diagnostics"]
+full = ["rhai", "js", "cucumber", "load", "harness", "axum", "macros", "diagnostics"]
 ## Rhai scripting frontend
 rhai = ["dep:rhai"]
 ## JavaScript (QuickJS) scripting frontend
 js = ["dep:rquickjs"]
+## Gherkin frontend: `.feature` files with a generic step library
+cucumber = ["dep:gherkin"]
 ## Load-test executors, latency histograms, thresholds
 load = ["dep:hdrhistogram"]
 ## `cargo test` / nextest integration via libtest-mimic
@@ -53,6 +55,7 @@ regex = "1.13"
 hdrhistogram = { version = "7.6", default-features = false, optional = true }
 rhai = { version = "1.27", features = ["sync", "serde"], optional = true }
 rquickjs = { version = "0.14", optional = true }
+gherkin = { version = "0.16", optional = true }
 libtest-mimic = { version = "0.8", optional = true }
 apitest-macros = { workspace = true, optional = true }
 linkme = { version = "0.3", optional = true }

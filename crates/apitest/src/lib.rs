@@ -12,7 +12,8 @@
 //!    recorded in `apitest.lock`, and the live spec of the service is diffed
 //!    against the pinned one *for that used surface only*.
 //! 3. **One core, many frontends.** Suites are plain values. They can be
-//!    written in Rust, Rhai, JavaScript or Python, and run functionally, as
+//!    written in Rust, Rhai, JavaScript or Python, or as Gherkin `.feature`
+//!    files, and run functionally, as
 //!    load tests, from the `apitest` CLI or from `cargo test`.
 //!
 //! Every value that crosses a language boundary (fixture values, request
@@ -30,6 +31,8 @@ pub mod auth;
 pub mod config;
 pub mod context;
 pub mod contract;
+#[cfg(feature = "cucumber")]
+pub mod cucumber;
 pub mod dotenv;
 pub mod dsl;
 pub mod http;

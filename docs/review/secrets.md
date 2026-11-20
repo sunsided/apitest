@@ -1,6 +1,6 @@
 ---
 title: Variables and secrets
-applyTo: "crates/apitest/src/redact.rs,crates/apitest/src/dotenv.rs,crates/apitest/src/runner/vars.rs,crates/apitest/src/auth.rs,crates/apitest/src/dsl/actor.rs,crates/apitest/src/report.rs,crates/apitest/src/context.rs,crates/apitest/src/script/**,crates/apitest-cli/src/main.rs,crates/apitest-cli/src/vars.rs,crates/apitest-cli/src/call.rs,crates/apitest-cli/src/call/**"
+applyTo: "crates/apitest/src/redact.rs,crates/apitest/src/dotenv.rs,crates/apitest/src/runner/vars.rs,crates/apitest/src/auth.rs,crates/apitest/src/dsl/actor.rs,crates/apitest/src/report.rs,crates/apitest/src/context.rs,crates/apitest/src/script/**,crates/apitest/src/cucumber/world.rs,crates/apitest/src/cucumber/builtin.rs,crates/apitest-cli/src/main.rs,crates/apitest-cli/src/vars.rs,crates/apitest-cli/src/call.rs,crates/apitest-cli/src/call/**"
 summary: Secrets never reach output unmasked, errors never quote templates or .env content, the process environment is only read.
 ---
 

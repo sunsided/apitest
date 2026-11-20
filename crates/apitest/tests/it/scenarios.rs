@@ -1,9 +1,6 @@
 //! Behavioural tests of the runner: contract drift, guaranteed cleanup,
 //! scheduling, lockfile, reports and load.
 
-/// The billing service under test.
-#[path = "../support/demo_server.rs"]
-mod demo;
 /// The billing suite written in Rust, plus the paths to its specs and script versions.
 #[path = "../support/rust_suite.rs"]
 mod rust_suite;
@@ -18,6 +15,8 @@ use apitest::prelude::*;
 use apitest::report::{Outcome, junit_xml};
 use apitest::runner::check_drift;
 use apitest::script::{LoadOptions, load_suites};
+
+use crate::demo;
 
 /// Starts the billing service in the given version.
 async fn server(v: demo::Variant) -> TestServer {
@@ -541,7 +540,10 @@ async fn script_suites_pass_and_clean_up() {
         let srv = server(demo::Variant::V1_0).await;
         let suites = load_suites(
             &rust_suite::suites_dir().join(file),
-            &LoadOptions { js_workers: 2 },
+            &LoadOptions {
+                js_workers: 2,
+                ..Default::default()
+            },
         )
         .unwrap();
         for s in &suites {
@@ -596,7 +598,10 @@ async fn js_load_with_one_runtime_per_vu_and_vu_scoped_login() {
     let srv = server(demo::Variant::V1_0).await;
     let suite = load_suites(
         &rust_suite::suites_dir().join("billing.js"),
-        &LoadOptions { js_workers: 4 },
+        &LoadOptions {
+            js_workers: 4,
+            ..Default::default()
+        },
     )
     .unwrap()
     .remove(0);

@@ -23,7 +23,7 @@ record Config:
   env_files?: list<string @len(1..)>
   # Regular expressions whose matches are masked (***) in logs, errors and reports.
   redact?: list<string @len(1..)>
-  # Suite files (.rhai, .js) run by `apitest run` without arguments.
+  # Suite files (.rhai, .js, .feature) run by `apitest run` without arguments.
   suites?: list<string>
   reports?: Reports
   # JS runtimes per suite in functional runs (load runs use one per VU).
