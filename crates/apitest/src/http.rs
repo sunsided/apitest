@@ -994,12 +994,20 @@ async fn fetch(req: reqwest::RequestBuilder) -> reqwest::Result<Received> {
     Ok((status, headers, bytes))
 }
 
-/// `url` without its query and fragment, for error messages: a path may carry a
+/// `url` without its userinfo, query and fragment, for error messages: a path may carry a
 /// credential inline (`/export?access_token=...`), and the redactor only knows
 /// secrets it was told about.
 fn without_query(url: &str) -> String {
-    let end = url.find(['?', '#']).unwrap_or(url.len());
+    if let Ok(mut u) = reqwest::Url::parse(url) {
+        let _ = u.set_username("");
+        let _ = u.set_password(None);
+        u.set_query(None);
+        u.set_fragment(None);
 
+        return u.to_string();
+    }
+
+    let end = url.find(['?', '#']).unwrap_or(url.len());
     url[..end].to_string()
 }
 
@@ -1062,6 +1070,10 @@ mod tests {
         );
         assert_eq!(without_query("http://hub.test/a#frag"), "http://hub.test/a");
         assert_eq!(without_query("http://hub.test/a"), "http://hub.test/a");
+        assert_eq!(
+            without_query("http://user:s3cr3t@hub.test/a?k=v"),
+            "http://hub.test/a"
+        );
     }
 
     #[test]
