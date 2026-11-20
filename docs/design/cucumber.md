@@ -56,12 +56,14 @@ Steps match regardless of keyword (`Given`/`When`/`Then`/`And`/`But`). Names in 
 
 ```gherkin
 Given "anon" is an anonymous actor on "billing"
-Given "admin" is the configured actor "hub_admin"            # actors: in apitest.nova
-Given "patient" logs in on "app" as "{{email}}" with password "${PATIENT_PW}"   # lazy, via the service's login flow
+Given "admin" is the configured actor "hub_admin"
+Given "patient" logs in on "app" as "{{email}}" with password "${PATIENT_PW}"
 Given "user" is an actor on "billing" with the bearer token "{{token}}"
 Given "ops" is an actor on "reports" with basic auth "ops" and password "${OPS_PW}"
 Given "user" sends the header "X-Tenant" with "t1"
 ```
+
+A configured actor comes from `actors:` in `apitest.nova`. `logs in` is lazy: it logs in through the service's login flow when the actor first sends.
 
 **Requests.** A contract call by `operationId`, or a raw request to a service, optionally with `expecting <status>` and one of three ways to pass data:
 
@@ -72,19 +74,19 @@ When "user" calls "createInvoice" expecting 201 with the JSON body:
   { "amount": 4200, "currency": "EUR" }
   """
 When "user" calls "getInvoice" with:
-  | in    | name     | value  |        # optional header row
+  | in    | name     | value  |
   | path  | id       | {{id}} |
   | query | expand   | lines  |
   | header| X-Trace  | abc    |
   | form  | user     | demo   |
-  | json  | amount   | 4200   |        # JSON value: 4200, "EUR", true, {"a":1}
+  | json  | amount   | 4200   |
 When "mail" sends GET "/messages" expecting 200 with options:
   """json
   { "query": { "to": "{{email}}" } }
   """
 ```
 
-`with options:` takes the same object as `cx.call(..)` in Rhai and JS (`path`, `query`, `headers`, `json`, `form`, `body`, `as`, `trace`, …).
+The table's `| in | name | value |` header row is optional, and a `json` cell is a JSON value (`4200`, `"EUR"`, `true`, `{"a":1}`). `with options:` takes the same object as `cx.call(..)` in Rhai and JS (`path`, `query`, `headers`, `json`, `form`, `body`, `trace`, …), except `service`, `as`, `auth` and `bearer`: the actor decides who sends and where.
 
 **Cleanups.** The same request steps prefixed with `afterwards`. The request is built (and `{{…}}` resolved) when the step runs and sent when the scenario ends, in LIFO order, whether it passed or not. Written right after the call that created something, it is the Gherkin form of `.rollback(..)`: a step that failed before it never registers it.
 
@@ -99,22 +101,28 @@ And afterwards "user" calls "deleteInvoice" expecting 204 with:
 ```gherkin
 And I remember the response at "/id" as "id"
 And I remember the response header "Location" as "location"
-Given a unique email with prefix "patient" as "email"         # unique_email(..)
-Given a unique value with prefix "case" as "case_name"        # unique(..)
+Given a unique email with prefix "patient" as "email"
+Given a unique value with prefix "case" as "case_name"
 ```
+
+The unique values are those of `unique_email(..)` and `unique(..)`: unique across runs and parallel tests.
 
 **Checks** (on the latest response):
 
 ```gherkin
-Then the status is 201                     # also: the response status is 201
-And the response contains:                 # partial JSON match (json_includes), path of the first mismatch in the error
+Then the status is 201
+And the response contains:
   """json
   { "status": "open", "currency": "EUR" }
   """
-And the response at "/currency" is "EUR"   # strict JSON: EUR without quotes is an error, not a string
+And the response at "/currency" is "EUR"
 And the response at "/items" has 2 items
 And the response header "Content-Type" is "application/json"
 ```
+
+- `the status is 201` can also be written `the response status is 201`.
+- `the response contains:` is a partial JSON match (`json_includes`); the error names the path of the first mismatch.
+- `the response at "/p" is …` takes strict JSON: `EUR` without quotes is an error, not a string. Numbers compare by value at any depth (`4200` equals `4200.0`).
 
 **Waiting.** `within <n> seconds|milliseconds|minutes, <step>` retries a step with the backoff of `eventually!` (50 ms growing to 1 s). For a check, the scenario's latest request is sent again before every new attempt. For a request step, the step itself is retried.
 
@@ -128,7 +136,7 @@ Then within 30 seconds, the response at "/0/subject" is "Confirm your e-mail"
 
 - `${NAME}` is a run variable (`--var`, the environment, `.env` files, `vars:`), the same lookup as everywhere else, and `$${` is a literal `${`. `{{name}}` is a value remembered in this scenario, `{{response:/pointer}}` a field of the latest response. Anything unresolved is an error, with a byte position rather than the text. There are no defaults. Inserted values are not scanned again, so a response can never name a variable.
 - JSON (docstrings, `json` table cells, the expected value of `the response at … is …`) is parsed first, and `${…}` and `{{…}}` are resolved inside its strings afterwards, so an inserted value can never add keys or change the document's structure. A string that is exactly one placeholder takes the value with its JSON type: `"id": "{{id}}"` is a number when the remembered value is one, `"id-{{id}}"` is a string. A check's expected value may also be a bare `{{id}}`.
-- Values inserted into the path of a raw request (`sends GET "/invoices/{{id}}"`) are percent-encoded as one path segment each, `.` and `..` included. The path must start with `/`, unless the step itself spells out an absolute `http(s)://` URL. The actor's credentials and headers go only to its own service's origin; a request to any other origin is sent without them.
+- Values inserted into the path of a raw request (`sends GET "/invoices/{{id}}"`) are percent-encoded as one path segment each; a value of `.` or `..` fails the step, since URL parsers treat even `%2E%2E` as a dot segment. The path must start with `/`, unless the step itself spells out an absolute `http(s)://` URL, scheme and host included (no `{{…}}` there). `with options:` can't set `service`, `as`, `auth` or `bearer`: the actor decides who sends and where. The actor's credentials and headers go only to its own service's origin; a request to any other origin is sent without them. Two limits are core behaviour of every frontend, not of Gherkin: headers set on the scope (by a fixture or hook) are sent to any origin, and the HTTP client follows redirects to other origins, which drops `Authorization` and cookies but keeps other headers.
 - Step names in reports are the text as written, with `${…}` and `{{…}}` unresolved, so values never end up there.
 - The login and basic-auth steps leave `${NAME}` to the actor's `Auth`, which resolves it when the first request is sent and masks the value in output and reports, exactly as for actors from `apitest.nova`. Bearer tokens and actor header values that come from a variable, a remembered value or a response are registered with the run's redactor in the step that sets them; values written literally in the step (`application/json`) are not.
 - Step errors, logs and the step trail reach the console and the reports through the run's `Redactor`, like every other frontend. Variables used elsewhere (a form field, a JSON body) are not masked unless they are registered secrets or match a `redact:` pattern; that is the same rule as for Rhai and JS.

@@ -1,8 +1,10 @@
-# Billing suite in Gherkin. Run: apitest run demo/suites/billing.feature
+# Billing suite in Gherkin. Run from demo/: apitest run suites/billing.feature
 #
-# Same tests as billing.rhai and billing.js, on the same runner: the contract is
-# pinned and drift-checked before any scenario runs, every call is validated
-# against it, and cleanups run even when a scenario fails.
+# The scenarios of billing.rhai and billing.js, without their per-test setup
+# and teardown example; the 404 case is a Scenario Outline, so its test name
+# carries the row's values. Same runner: the contract is pinned and
+# drift-checked before any scenario runs, every call is validated against it,
+# and cleanups run even when a scenario fails.
 @contract:billing=../specs/billing-1.0.yaml @live_spec:billing=/openapi.json
 Feature: billing-feature
 
