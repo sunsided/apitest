@@ -231,6 +231,37 @@ Feature: secrets
     assert!(!all.contains("hunter2"), "{all}");
 }
 
+/// Credentials written out in a step (a bearer token, a credential header in a
+/// step, a table or options) are masked in the report, also for an actor that
+/// never sends; an ordinary literal header value stays readable.
+#[tokio::test(flavor = "multi_thread")]
+async fn literal_credentials_in_steps_are_masked() {
+    let srv = server(demo::Variant::V1_0).await;
+    let suite = inline(
+        r#"
+Feature: literal secrets
+  Scenario: leak
+    Given "idle" is an actor on "billing" with the bearer token "tok-literal-bearer"
+    And "b" is an anonymous actor on "billing"
+    And "b" sends the header "X-Api-Key" with "key-literal-header"
+    And "b" sends the header "Accept" with "application/json"
+    When "b" sends GET "/_stats" with:
+      | header | Authorization | Bearer tok-literal-table |
+    And "b" sends GET "/_stats" with options:
+      """json
+      { "headers": { "X-Api-Key": "key-literal-options" } }
+      """
+    Then the status is 599
+"#,
+    );
+    let report = run_suite(&suite, &cfg(&srv)).await;
+    failure(&report);
+
+    let all = serde_json::to_string(&report).unwrap();
+    assert!(!all.contains("literal-"), "{all}");
+    assert!(all.contains("application/json"), "{all}");
+}
+
 /// `within …,` re-sends the latest request until the check passes, and custom
 /// Rust steps sit next to the built-in ones.
 #[tokio::test(flavor = "multi_thread")]
@@ -362,4 +393,54 @@ Feature: hostile values
     assert_eq!(other_seen.len(), 1, "{other_seen:?}");
     assert_eq!(other_seen[0].0, "/steal");
     assert_eq!(other_seen[0].1, None, "credentials leaked to another host");
+}
+
+/// A value cannot pick the host of an absolute URL, the service or identity of
+/// a request (through `with options:`), or climb the path with `..`; each step
+/// fails before anything is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn values_cannot_choose_host_service_or_path_level() {
+    let (other, other_seen) = recording_server(json!({})).await;
+    let host = other.base_url().trim_start_matches("http://").to_string();
+    let (svc, _) = recording_server(json!({ "host": host, "dots": "..", "who": "admin" })).await;
+    let src = r#"
+Feature: retargeting values
+  Background:
+    Given "u" is an actor on "svc" with the bearer token "tok-1234-secret"
+    When "u" sends GET "/start" expecting 200
+    And I remember the response at "/host" as "host"
+    And I remember the response at "/dots" as "dots"
+    And I remember the response at "/who" as "who"
+
+  Scenario: no host from a value
+    When "u" sends GET "http://{{host}}/steal"
+
+  Scenario: no service or identity in options
+    When "u" sends GET "/go" with options:
+      """json
+      { "service": "svc", "as": "{{who}}" }
+      """
+
+  Scenario: no dot segments from a table
+    When "u" sends GET "/inv/{id}/lines" with:
+      | path | id | {{dots}} |
+"#;
+    let cfg = RunConfig::new(svc.base_url())
+        .service("svc", svc.base_url())
+        .quiet(true);
+    let report = run_suite(&inline(src), &cfg).await;
+    for (i, expected) in [
+        "host of an absolute URL must be written out",
+        "can't be set in step options",
+        "dot segment",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Outcome::Failed { message, .. } = &report.tests[i].outcome else {
+            panic!("{:?}", report.tests[i].outcome);
+        };
+        assert!(message.contains(expected), "{message}");
+    }
+    assert!(other_seen.lock().unwrap().is_empty());
 }

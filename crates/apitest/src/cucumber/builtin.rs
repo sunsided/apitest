@@ -17,7 +17,7 @@ use super::steps::{StepArgs, Steps};
 use super::world::World;
 use crate::auth::Auth;
 use crate::dsl::{Actor, json_includes, unique, unique_email};
-use crate::http::{Request, RequestOpts, truncate};
+use crate::http::{Request, RequestOpts, scalar, truncate};
 
 /// A quoted step argument: `"…"`, captured without the quotes.
 const Q: &str = r#""([^"]*)""#;
@@ -122,13 +122,15 @@ async fn login_actor(w: World, a: StepArgs) -> Result<()> {
     Ok(())
 }
 
-/// `"a" is an actor on "svc" with the bearer token "t"`. A token taken from a
-/// remembered value or a response is masked from here on; a `${NAME}` is
-/// masked by the actor's `Auth` when it is resolved.
+/// `"a" is an actor on "svc" with the bearer token "t"`. The token is masked
+/// from here on, whether it is written in the step, remembered, taken from a
+/// response or a `${NAME}`.
 async fn bearer_actor(w: World, a: StepArgs) -> Result<()> {
-    let raw = a.get(3)?;
-    let token = w.interpolate_values(raw)?;
-    mask_resolved(&w, raw, &token);
+    let token = w.interpolate_values(a.get(3)?)?;
+    // An unresolved `${NAME}` is reported when the actor first sends.
+    if let Ok(resolved) = crate::auth::interpolate(&token, w.cx()) {
+        w.cx().config().redactor.secret(&resolved);
+    }
     let actor = Actor::on(&w.interpolate(a.get(2)?)?).bearer(token);
     w.set_actor(a.get(1)?, actor);
     Ok(())
@@ -144,23 +146,24 @@ async fn basic_actor(w: World, a: StepArgs) -> Result<()> {
     Ok(())
 }
 
-/// `"a" sends the header "H" with "v"`. A value that came from a variable, a
-/// remembered value or a response usually carries a key or token, so it is
-/// masked from here on. A literal value (`application/json`) is not.
+/// `"a" sends the header "H" with "v"`, masked as [`mask_header`] decides.
 async fn actor_header(w: World, a: StepArgs) -> Result<()> {
-    let raw = a.get(3)?;
+    let (name, raw) = (a.get(2)?, a.get(3)?);
     let value = w.interpolate(raw)?;
-    mask_resolved(&w, raw, &value);
-    let actor = w.actor(a.get(1)?)?.with_header(a.get(2)?, value);
+    mask_header(&w, name, raw, &value);
+    let actor = w.actor(a.get(1)?)?.with_header(name, value);
     w.set_actor(a.get(1)?, actor);
     Ok(())
 }
 
-/// Registers `resolved` with the run's redactor when it came from somewhere
-/// other than the step text `raw` and holds no template left for later.
-fn mask_resolved(w: &World, raw: &str, resolved: &str) {
-    if resolved != raw && !resolved.contains("${") {
-        w.cx().config().redactor.secret(resolved);
+/// Registers a header value with the run's redactor when it is a credential:
+/// the header's name is a credential's (`Authorization`, `X-Api-Key`), or the
+/// value came from a variable, a remembered value or a response rather than
+/// being written out (`raw` is the text as written). A literal
+/// `application/json` stays readable.
+fn mask_header(w: &World, name: &str, raw: &str, value: &str) {
+    if value != raw || crate::redact::is_secret_name(name) {
+        w.cx().config().redactor.header_value(value);
     }
 }
 
@@ -301,16 +304,18 @@ fn build_request(w: &World, a: &StepArgs) -> Result<Request<'static>> {
 
 /// A raw request of `actor` to `path` as written in the step.
 ///
-/// Values inserted into the path are percent-encoded segments, so only the
-/// step text decides where the request goes: a path on the actor's service, or
-/// an absolute URL written out in the step. The actor's credentials and
-/// headers go only to its own service's origin; anywhere else the request is
-/// sent without them (and without the scope's auth).
+/// Values inserted into the path are percent-encoded segments, and none may
+/// stand in the scheme or host of an absolute URL, so only the step text
+/// decides where the request goes: a path on the actor's service, or an
+/// absolute URL written out in the step. The actor's credentials and headers
+/// go only to its own service's origin; a request to any other origin is sent
+/// without them. Headers set on the scope (by a fixture or hook) are sent
+/// either way, and the HTTP client follows redirects to other origins.
 ///
 /// # Errors
 ///
-/// Fails when the path is neither `/…` nor a literal `http(s)://` URL, or
-/// cannot be interpolated.
+/// Fails when the path is neither `/…` nor an `http(s)://` URL whose origin is
+/// written out in the step, or cannot be interpolated.
 fn raw_request(
     w: &World,
     actor: &Actor,
@@ -323,6 +328,14 @@ fn raw_request(
         absolute || path.starts_with('/'),
         "the path of a raw request must start with `/` (or be an absolute http(s):// URL written in the step)"
     );
+    if absolute {
+        let rest = &path[path.find("://").map_or(0, |i| i + 3)..];
+        let origin = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+        ensure!(
+            !origin.contains("{{"),
+            "the host of an absolute URL must be written out in the step; a {{{{..}}}} value may only stand in its path or query"
+        );
+    }
 
     let url = w.interpolate_path(path)?;
     if absolute && !same_origin(w, actor, &url) {
@@ -333,9 +346,7 @@ fn raw_request(
     }
 
     // `.opts(..)` replaces the options, including the actor's service.
-    if opts.service.is_none() {
-        opts.service.clone_from(&actor.service);
-    }
+    opts.service.clone_from(&actor.service);
 
     Ok(actor.request(method, &url).opts(opts))
 }
@@ -368,6 +379,25 @@ fn request_opts(w: &World, a: &StepArgs) -> Result<RequestOpts> {
             opts = serde_json::from_value(w.interpolate_json(a.docstring()?)?).context(
                 "invalid request options (same shape as in Rhai/JS: path, query, headers, json, form, body, …)",
             )?;
+            // The actor alone decides who sends and where to, so neither the
+            // feature nor a value from a response can move its credentials.
+            ensure!(
+                opts.service.is_none()
+                    && opts.as_actor.is_none()
+                    && opts.auth.is_none()
+                    && opts.bearer.is_none(),
+                "`service`, `as`, `auth` and `bearer` can't be set in step options: the actor decides \
+                 who sends the request and to which service; declare another actor instead"
+            );
+            let raw: Value = serde_json::from_str(a.docstring()?.trim()).unwrap_or(Value::Null);
+            for (name, value) in &opts.headers {
+                let written = raw
+                    .get("headers")
+                    .and_then(|h| h.get(name))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                mask_header(w, name, written, &scalar(value));
+            }
         }
         Some(other) => bail!("unexpected '{other}'"),
     }
@@ -409,7 +439,11 @@ fn fill_from_table(w: &World, rows: &[Vec<String>], opts: &mut RequestOpts) -> R
                 i + 1
             ),
         };
-        target.insert(name.clone(), Value::String(w.interpolate(value)?));
+        let resolved = w.interpolate(value)?;
+        if place == "header" {
+            mask_header(w, name, value, &resolved);
+        }
+        target.insert(name.clone(), Value::String(resolved));
     }
 
     opts.form = (!form.is_empty()).then_some(form);
