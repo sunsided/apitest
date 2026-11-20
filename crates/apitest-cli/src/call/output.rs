@@ -99,22 +99,24 @@ pub fn summary(
 
 /// Registers credentials passed on the command line as secrets of
 /// `redactor`, so they are masked wherever they show up (a body that echoes
-/// them, an error), not only in the `-v` lines: the values of `-H` headers whose
-/// names are [`is_sensitive`], and of `--query` parameters whose names are
-/// [`is_secret_param`].
+/// them, an error), not only in the `-v` lines: the values of `-H` headers and
+/// query parameters whose names [`is_secret_name`] accepts. `query` holds the
+/// `--query` pairs and those written inline in the path.
 ///
-/// Query names get the stricter test because a substring match (`keyword`
-/// contains `key`) would mask ordinary search terms in the body on stdout.
+/// Registration uses the word-based test rather than [`is_sensitive`]'s
+/// substring match, because a registered value is masked everywhere: a
+/// substring match would turn an `X-Idempotency-Key` or a `keyword` search term
+/// in the body on stdout into `***`.
 pub fn register_secrets(
     redactor: &Redactor,
     headers: &[(String, String)],
     query: &[(String, String)],
 ) {
-    for (_, v) in headers.iter().filter(|(k, _)| is_sensitive(k)) {
-        register_value(redactor, v);
-    }
-
-    for (_, v) in query.iter().filter(|(k, _)| is_secret_param(k)) {
+    for (_, v) in headers
+        .iter()
+        .chain(query)
+        .filter(|(k, _)| is_secret_name(k))
+    {
         register_value(redactor, v);
     }
 }
@@ -130,19 +132,58 @@ fn register_value(redactor: &Redactor, v: &str) {
     }
 }
 
-/// Whether a query parameter name is a credential's: `key`, `apikey`, `sig`,
-/// `signature`, a name ending in `token`, `secret` or `password` (also
-/// camelCase such as `accessToken`), or one ending in `_key`/`-key`, ignoring
-/// case. `key` needs the separator so names like `monkey` stay visible.
-fn is_secret_param(name: &str) -> bool {
-    const EXACT: [&str; 4] = ["key", "apikey", "sig", "signature"];
-    const SUFFIXES: [&str; 3] = ["token", "secret", "password"];
-    let name = name.to_ascii_lowercase();
+/// Whether a header or query parameter name is a credential's, judged by its
+/// words (split at `-`, `_`, `.` and camelCase, ignoring case): one of them is
+/// `token`, `secret`, `password`, `passwd`, `credential(s)`, `signature`,
+/// `sig`, `session`, `cookie`, `auth`, `authorization` or `apikey`, or the
+/// last word is `key` and the name isn't an idempotency key. So `accessToken`,
+/// `oauth_signature`, `X-Amz-Signature` and `X-Api-Key` count, while
+/// `keyword`, `author`, `monkey`, `X-Key-Id` and `Idempotency-Key` don't.
+fn is_secret_name(name: &str) -> bool {
+    const WORDS: [&str; 13] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "credentials",
+        "signature",
+        "sig",
+        "session",
+        "cookie",
+        "auth",
+        "authorization",
+        "apikey",
+    ];
+    let words = name_words(name);
 
-    EXACT.contains(&name.as_str())
-        || SUFFIXES.iter().any(|s| name.ends_with(s))
-        || name.ends_with("_key")
-        || name.ends_with("-key")
+    words.iter().any(|w| WORDS.contains(&w.as_str()))
+        || (words.last().is_some_and(|w| w == "key") && !words.iter().any(|w| w == "idempotency"))
+}
+
+/// The lowercase words of a name, split at non-alphanumeric characters and at
+/// camelCase boundaries (`accessToken` → `access`, `token`).
+fn name_words(name: &str) -> Vec<String> {
+    let mut words = vec![];
+    let mut current = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() {
+            words.extend((!current.is_empty()).then(|| std::mem::take(&mut current)));
+            prev_lower = false;
+            continue;
+        }
+
+        if c.is_ascii_uppercase() && prev_lower {
+            words.push(std::mem::take(&mut current));
+        }
+
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        current.push(c.to_ascii_lowercase());
+    }
+
+    words.extend((!current.is_empty()).then_some(current));
+    words
 }
 
 /// Whether `name` is `Authorization` or `Proxy-Authorization`, whose values
@@ -212,7 +253,7 @@ fn redact(name: &str, v: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_secret_param, is_sensitive, redact, request_url};
+    use super::{is_secret_name, is_sensitive, redact, request_url};
 
     #[test]
     fn only_authorization_keeps_its_scheme() {
@@ -246,12 +287,29 @@ mod tests {
             "clientSecret",
             "authToken",
             "userPassword",
+            "oauth_signature",
+            "X-Amz-Signature",
+            "session",
+            "Cookie",
+            "credential",
+            "Authorization",
+            "X-Auth-Token",
         ] {
-            assert!(is_secret_param(n), "{n}");
+            assert!(is_secret_name(n), "{n}");
         }
 
-        for n in ["q", "keyword", "author", "monkey", "page", "tokens_left"] {
-            assert!(!is_secret_param(n), "{n}");
+        for n in [
+            "q",
+            "keyword",
+            "author",
+            "monkey",
+            "page",
+            "tokens_left",
+            "X-Idempotency-Key",
+            "X-Key-Id",
+            "oauth_nonce",
+        ] {
+            assert!(!is_secret_name(n), "{n}");
         }
     }
 
