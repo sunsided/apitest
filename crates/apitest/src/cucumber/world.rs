@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
 
 use super::StepArgs;
@@ -163,11 +163,7 @@ impl World {
     /// Fails on a malformed or unresolved `${..}` or `{{..}}`. The error gives
     /// a byte position, never the text: it may hold a secret.
     pub fn interpolate(&self, text: &str) -> Result<String> {
-        self.substitute(
-            text,
-            |piece| crate::auth::interpolate(piece, &self.cx),
-            |v| v,
-        )
+        self.substitute(text, |piece| crate::auth::interpolate(piece, &self.cx), Ok)
     }
 
     /// Only `{{..}}`. Auth steps use this and leave `${NAME}` to the actor's
@@ -177,20 +173,31 @@ impl World {
     ///
     /// # Errors
     ///
-    /// Fails on a malformed or unresolved `{{..}}`, with a byte position.
+    /// Fails on a malformed or unresolved `{{..}}`, with a byte position, and
+    /// when an inserted value ending in `$` is directly followed by `${NAME}`:
+    /// the template syntax has no escape for a lone `$`, so the two would read
+    /// as an escaped literal `${`.
     pub fn interpolate_values(&self, text: &str) -> Result<String> {
         let parts = self.parts(text)?;
         let mut out = String::with_capacity(text.len());
         for (i, part) in parts.iter().enumerate() {
-            let brace_follows = parts[i + 1..]
+            let next = parts[i + 1..]
                 .iter()
                 .map(Part::text)
-                .find(|t| !t.is_empty())
-                .is_some_and(|t| t.starts_with('{'));
+                .find(|t| !t.is_empty());
+            let brace_follows = next.is_some_and(|t| t.starts_with('{'));
             let piece = match part {
                 Part::Literal(s) => (*s).to_string(),
                 Part::Value(v) => v.replace("${", "$${"),
             };
+            if matches!(part, Part::Value(_))
+                && piece.ends_with('$')
+                && next.is_some_and(|t| t.starts_with("${"))
+            {
+                bail!(
+                    "a {{{{..}}}} value ending in `$` is directly followed by `${{..}}`; put a character between them"
+                );
+            }
             out.push_str(&piece);
 
             // A `$` that meets a `{` across a boundary would form a new `${`:
@@ -227,17 +234,20 @@ impl World {
     }
 
     /// `{{..}}` and `${..}` in a raw request path. Every inserted value is
-    /// percent-encoded as one path segment (`.` and `..` included), so a value
-    /// cannot add segments, a query or another host to the path.
+    /// percent-encoded as one path segment, so a value cannot add segments or a
+    /// query to the path.
     ///
     /// # Errors
     ///
-    /// Fails like [`World::interpolate`].
+    /// Fails like [`World::interpolate`], and for an inserted `.` or `..`, which
+    /// would move the request up the path.
     pub fn interpolate_path(&self, path: &str) -> Result<String> {
         self.substitute(
             path,
-            |piece| crate::auth::interpolate_with(piece, |name| Ok(segment(&self.cx.env(name)?))),
-            |v| segment(&v),
+            |piece| {
+                crate::auth::interpolate_with(piece, |name| encode_segment(&self.cx.env(name)?))
+            },
+            |v| encode_segment(&v),
         )
     }
 
@@ -279,13 +289,13 @@ impl World {
         &self,
         text: &str,
         literal: impl Fn(&str) -> Result<String>,
-        value: impl Fn(String) -> String,
+        value: impl Fn(String) -> Result<String>,
     ) -> Result<String> {
         self.parts(text)?
             .into_iter()
             .map(|p| match p {
                 Part::Literal(s) => literal(s),
-                Part::Value(v) => Ok(value(v)),
+                Part::Value(v) => value(v),
             })
             .collect()
     }
@@ -335,16 +345,6 @@ impl Part<'_> {
             Part::Literal(s) => s,
             Part::Value(v) => v,
         }
-    }
-}
-
-/// `value` percent-encoded as a single path segment; `.` and `..` are encoded
-/// too, so they cannot climb out of the path they are inserted into.
-fn segment(value: &str) -> String {
-    match value {
-        "." => "%2E".into(),
-        ".." => "%2E%2E".into(),
-        other => encode_segment(other),
     }
 }
 
@@ -402,7 +402,7 @@ mod tests {
             "/go/http%3A%2F%2Fother.test%2Fsteal%3Fx%3D1"
         );
         w.remember("v", Value::String("..".into()));
-        assert_eq!(w.interpolate_path("/a/{{v}}/b").unwrap(), "/a/%2E%2E/b");
+        assert!(w.interpolate_path("/a/{{v}}/b").is_err());
         assert_eq!(
             w.interpolate_path("/s/${SECRET}").unwrap(),
             "/s/hunter2-secret"
@@ -427,5 +427,14 @@ mod tests {
 
         let resolved = crate::auth::interpolate("a$${SECRET}", w.cx()).unwrap();
         assert_eq!(resolved, "a${SECRET}");
+
+        // A value ending in `$` before `${NAME}` can't be written unambiguously.
+        w.remember("v", Value::String("a$".into()));
+        assert!(w.interpolate_values("{{v}}${SECRET}").is_err());
+        let t = w.interpolate_values("{{v}}-${SECRET}").unwrap();
+        assert_eq!(
+            crate::auth::interpolate(&t, w.cx()).unwrap(),
+            "a$-hunter2-secret"
+        );
     }
 }
