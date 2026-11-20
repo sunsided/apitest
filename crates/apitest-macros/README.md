@@ -56,7 +56,7 @@ fn main() {
 | Macro | On | Arguments |
 |---|---|---|
 | `#[apitest::suite]` | `fn() -> Result<Suite>` | `suite = ".."` (default: module path) |
-| `#[apitest::fixture]` | `async fn` returning any `Serialize` value | `scope = "suite" \| "vu" \| "test"` (default `test`), `teardown = path`, `name = ".."`, `suite = ".."` |
+| `#[apitest::fixture]` | `async fn` returning `Result<T>`, `T: Serialize` | `scope = "suite" \| "vu" \| "test"` (default `test`), `teardown = path`, `name = ".."`, `suite = ".."` |
 | `#[apitest::test]` | `async fn` returning `Result<()>` | `parallel` \| `serial` (default), `resources = [..]`, `timeout_ms = N`, `tags = [..]`, `name = ".."`, `suite = ".."` |
 
 - Parameters are fixtures, resolved **by name** and deserialized into the parameter type. A `cx: Ctx`

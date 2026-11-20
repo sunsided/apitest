@@ -24,7 +24,7 @@ Prebuilt binaries for Linux, macOS and Windows are attached to each
 | Command | Does |
 |---|---|
 | `apitest run [suites…]` | Runs suites functionally; without arguments, the suites listed in `./apitest.nova` |
-| `apitest load <suite> -t <test>` | Runs one test as a load scenario with VUs, stages and thresholds |
+| `apitest load <file> -t <test>` | Runs one test as a load scenario with VUs, stages and thresholds |
 | `apitest contract check` | Diffs the pinned specs against the live service or named comparison specs |
 | `apitest contract diff <old> <new>` | Compares two OpenAPI documents; exits 1 on breaking changes |
 | `apitest call <service> <method> <path>` | Sends one request, no suite or spec needed |

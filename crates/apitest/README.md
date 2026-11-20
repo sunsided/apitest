@@ -62,7 +62,8 @@ Inside `#[tokio::test]`, `run_suite(&suite, &cfg).await.assert_passed()` works t
 
 With the `harness` and `macros` features, a module is a suite, and fixtures are injected into tests by
 parameter name. Put this in a test target with `harness = false`, and it runs under `cargo test` and
-`cargo nextest run`, with filters and rust-analyzer's ▶ Run working as usual:
+`cargo nextest run`, with filters and rust-analyzer's ▶ Run working as usual. (Not compiled as a doctest:
+it needs your app and an OpenAPI spec.)
 
 ```rust,ignore
 mod billing {
@@ -123,7 +124,7 @@ fn main() {
 | readable failure reports | `step("what happens", future_or_request).await?` |
 | check part of a body | `assert_json!(resp, { "status": "in_progress" })` |
 | unique test data | `unique("case")`, `unique_email("patient")` |
-| a check after all suites | `Plan::finally("nothing left behind", \|\| async { .. })` |
+| a check after all suites | `apitest::harness::Plan::finally("nothing left behind", \|\| async { .. })` (feature `harness`, not in the prelude) |
 
 ## Lifecycle
 
@@ -159,8 +160,8 @@ suite billing-rust
   - create and fetch invoice [0 ms] (skipped: contract drift)
 ```
 
-- `RunConfig::update_lock` records the parameters, request fields and statuses the suites used in
-  `apitest.lock.nova`; the drift check only looks at that surface.
+- `RunConfig::lockfile(path)` with `update_lock(true)` records the parameters, request fields and statuses
+  the suites used (the CLI uses `apitest.lock.nova`); the drift check only looks at that surface.
 - Besides the live spec, you can diff against named specs (files or URLs, e.g. what QA and prod run) with
   `RunConfig::drift_target` and `drift_against`, so the check doesn't need a running service.
 - With utoipa, pass the generated document directly:
@@ -168,7 +169,8 @@ suite billing-rust
 
 ## Load testing
 
-Functional tests double as load scenarios (feature `load`, on by default):
+Functional tests double as load scenarios (feature `load`, on by default). (Not compiled as a doctest: it
+needs a suite and a running service.)
 
 ```rust,ignore
 use apitest::load::{Executor, LoadPlan, Scenario, run_load};
